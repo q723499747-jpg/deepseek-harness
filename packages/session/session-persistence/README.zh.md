@@ -51,7 +51,7 @@ const headers = await ctx.sessionPersistence.list()        // every stored sessi
 
 ### 失败与恢复
 
-当前构建无法忠实解读的存储日志会以方向感知的错误被拒绝，绝不错读。`SESSION_FORMAT_VERSION` 保持 v0，本构建不提供格式迁移路径；更高版本会要求操作者升级 harness。解码器只接受下文点名的有限同版本记录变体。本构建不认识的每个事件类型都会拒绝重建，而已提交前缀中的损坏以 `SessionPersistenceCorruptionError` 拒绝（[理由](../../../.agents/notes/implemented/simplification/2026-08-25-fail-closed-session-event-vocabulary.zh.md)）。对仍绑定到活动会话的 id 执行 `load`，会先刷新其快照并在轮次开放时拒绝；冷 load 应用恢复。
+当前组合无法忠实解读的存储日志会以方向感知的错误被拒绝，绝不错读。`SESSION_FORMAT_VERSION` 保持 v0，本构建不提供格式迁移路径；更高版本会要求操作者升级 harness。解码器只接受下文点名的有限同版本记录变体。生成的内建集合与当前已加载插件的 effect-owned 注册都不包含的每个事件类型都会拒绝重建，而已提交前缀中的损坏以 `SessionPersistenceCorruptionError` 拒绝（[理由](../../../.agents/notes/implemented/simplification/2026-08-25-fail-closed-session-event-vocabulary.zh.md)）。对仍绑定到活动会话的 id 执行 `load`，会先刷新其快照并在轮次开放时拒绝；冷 load 应用恢复。
 
 `prepareExact` 是供调用方证明 hydrate 未改变存储的零写 resume 原语。它预留当前且已平衡的源；若 torn tail 或 synthetic closer 需要修复，则以 `SessionPersistenceRecoveryRequiredError` 拒绝。普通 `prepare` 仍保留提交恢复的既有行为。
 

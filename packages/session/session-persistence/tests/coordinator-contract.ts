@@ -1375,6 +1375,37 @@ export function runCoordinatorContract(name: string, makeFixture: () => Promise<
       }
     })
 
+    it('loads a downstream event only while its owner registration is active', async () => {
+      const fix = await makeFixture()
+      const { ctx, fiber } = await freshCtx(fix)
+      try {
+        const required = meta('registered-external', WORK)
+        await ctx.sessionPersistence.create(required)
+        await ctx.sessionPersistence.append(required.id, [
+          ...oneTurnLog(),
+          { type: 'external/task-event', seq: oneTurnLog().length, time: 99, data: { payload: 1 } } as unknown as SessionEvent,
+        ])
+        const registration = {
+          owner: 'external-task-plugin', prefix: 'external/', types: ['external/task-event'],
+        }
+        const first = ctx.sessions.registerEventTypes(registration)
+        const second = ctx.sessions.registerEventTypes(registration)
+        await expect(ctx.sessionPersistence.load(required.id)).resolves.toMatchObject({
+          events: [...oneTurnLog(), expect.objectContaining({ type: 'external/task-event' })],
+        })
+        first()
+        await expect(ctx.sessionPersistence.load(required.id)).resolves.toMatchObject({
+          events: [...oneTurnLog(), expect.objectContaining({ type: 'external/task-event' })],
+        })
+        second()
+        await expect(ctx.sessionPersistence.load(required.id))
+          .rejects.toThrow(/event type "external\/task-event".*unknown to this harness/)
+      } finally {
+        await fiber.dispose()
+        await fix.cleanup()
+      }
+    })
+
     it('round-trips a header with parentSession (fork lineage)', async () => {
       const fix = await makeFixture()
       const { ctx, fiber } = await freshCtx(fix)

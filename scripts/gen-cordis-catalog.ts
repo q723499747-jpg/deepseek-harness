@@ -245,6 +245,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   DurableSessionResolveRequest: 'session.md',
   DurableSessionSafeResolveResult: 'session.md',
   DurableSessionResolveResult: 'session.md',
+  ExternalSessionEventTypeRegistration: 'session.md',
   ExternalTaskSessionMarker: 'session.md',
   AllowedModelRoute: 'subagent.md',
   SubagentModelSelectionSettings: 'subagent.md',

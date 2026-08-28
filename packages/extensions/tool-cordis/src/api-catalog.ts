@@ -1793,6 +1793,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'In-memory session store (`ctx.sessions`).\n\nPersistence is intentionally not implemented here — persistence plugins subscribe to `session/event` and flush on `session/flush` / dispose.',
     methods: [
       {
+        signature: 'registerEventTypes(registration: ExternalSessionEventTypeRegistration): () => void',
+        description: 'Register one exact event vocabulary owned by a loaded external plugin. Repeating the same owner and vocabulary is reference-counted. A different owner for one type, a changed vocabulary for an active owner, a built-in type, or a type outside the declared prefix rejects before publication.',
+        parameters: [{ name: 'registration', description: 'exact owner, namespace prefix, and complete event names.' }],
+        returns: 'an idempotent disposer for the caller\'s plugin effect.',
+      },
+      {
+        signature: 'supportsEventType(type: string): boolean',
+        description: 'Test whether the current plugin composition can interpret one event type.',
+        parameters: [{ name: 'type', description: 'durable event name read from persistence.' }],
+        returns: 'true for a built-in or currently registered plugin event.',
+      },
+      {
         signature: 'create(id?: SessionId, options?: CreateSessionOptions): Session',
         description: 'Create a session owned by the calling fiber: disposing that fiber stops event notification and removes the session from the store. `options.seed` populates the session with a copy of those events (replay/fork); `options.meta` attaches creation metadata (validated absolute `cwd`, seed and parent lineage, and delegation depth) as the immutable SessionHeader (the store fills `version`/`id`/`createdAt`).\n\nFor an agent whose session must be torn down IN ORDER with its loop (so the loop\'s final events are published before the store attachment ends), do NOT use this — fold the session lifecycle into the agent\'s own effect via prepare + enter + announce (see `dsh-agent-loop`\'s creation transaction).',
         parameters: [{ name: 'id', description: 'the session id; omitted, the store mints `session-<n>`.' }, { name: 'options', description: 'seed events and/or creation metadata for the header.' }],
@@ -4004,6 +4016,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'EpochHeader',
     declaration: 'export interface EpochHeader {\n    config: LlmCallConfig;\n    adapterDefaults?: LlmCallConfigAdapterDefaults;\n    system?: string;\n    tools?: ToolSchema[];\n}',
+  },
+  {
+    name: 'ExternalSessionEventTypeRegistration',
+    declaration: 'export interface ExternalSessionEventTypeRegistration {\n    readonly owner: string;\n    readonly prefix: string;\n    readonly types: readonly string[];\n}',
   },
   {
     name: 'ExternalTaskSessionMarker',

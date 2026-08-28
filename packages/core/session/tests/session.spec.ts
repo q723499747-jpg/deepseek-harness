@@ -12,6 +12,50 @@ import SessionStore, {
 import type { CreateSessionOptions, SessionEventType, SessionHeader, SessionSurface } from '@deepseek-ai/dsh-session'
 
 describe('Session', () => {
+  it('reference-counts validated downstream event type registrations', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const registration = {
+      owner: 'external-task-plugin',
+      prefix: 'external/',
+      types: ['external/task-event'],
+    }
+    const first = ctx.sessions.registerEventTypes(registration)
+    const second = ctx.sessions.registerEventTypes(registration)
+
+    try {
+      expect(ctx.sessions.supportsEventType('turn/start')).toBe(true)
+      expect(ctx.sessions.supportsEventType('external/task-event')).toBe(true)
+      first()
+      expect(ctx.sessions.supportsEventType('external/task-event')).toBe(true)
+      second()
+      expect(ctx.sessions.supportsEventType('external/task-event')).toBe(false)
+      expect(() => ctx.sessions.registerEventTypes({
+        owner: 'invalid-plugin', prefix: 'leak/', types: ['leak/check', 'bad event'],
+      })).toThrow(/invalid name/)
+      expect(ctx.sessions.supportsEventType('leak/check')).toBe(false)
+      expect(() => ctx.sessions.registerEventTypes({
+        owner: 'duplicate-plugin', prefix: 'same/', types: ['same/event', 'same/event'],
+      })).toThrow(/duplicates/)
+      expect(() => ctx.sessions.registerEventTypes({
+        owner: 'wrong-prefix-plugin', prefix: 'right/', types: ['wrong/event'],
+      })).toThrow(/outside its prefix/)
+      const owned = ctx.sessions.registerEventTypes({
+        owner: 'one-owner', prefix: 'owned/', types: ['owned/event'],
+      })
+      expect(() => ctx.sessions.registerEventTypes({
+        owner: 'other-owner', prefix: 'owned/', types: ['owned/event'],
+      })).toThrow(/another owner/)
+      expect(() => ctx.sessions.registerEventTypes({
+        owner: 'one-owner', prefix: 'owned/', types: ['owned/changed'],
+      })).toThrow(/different vocabulary/)
+      owned()
+      expect(ctx.sessions.supportsEventType('owned/event')).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('exposes one stable readonly surface view', () => {
     const session = Session.create(SessionId('surface-view'))
     const surface = session.surface

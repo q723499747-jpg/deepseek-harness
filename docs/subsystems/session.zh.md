@@ -775,6 +775,23 @@ Persistence is intentionally not implemented here — persistence plugins subscr
 
 ```ts cordis-catalog
 /**
+ * Register one exact event vocabulary owned by a loaded external plugin.
+ * Repeating the same owner and vocabulary is reference-counted. A different
+ * owner for one type, a changed vocabulary for an active owner, a built-in
+ * type, or a type outside the declared prefix rejects before publication.
+ * @param registration - exact owner, namespace prefix, and complete event names.
+ * @returns an idempotent disposer for the caller's plugin effect.
+ */
+registerEventTypes(registration: ExternalSessionEventTypeRegistration): () => void
+
+/**
+ * Test whether the current plugin composition can interpret one event type.
+ * @param type - durable event name read from persistence.
+ * @returns true for a built-in or currently registered plugin event.
+ */
+supportsEventType(type: string): boolean
+
+/**
  * Create a session owned by the calling fiber: disposing that fiber stops
  * event notification and removes the session from the store. `options.seed`
  * populates the session with a copy of those events (replay/fork);

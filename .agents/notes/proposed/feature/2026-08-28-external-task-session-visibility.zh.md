@@ -18,6 +18,8 @@ Host 重启后，同一持久 Session 还可能不在内存 registry。复用任
 
 `SessionPersistence.prepareExact(sessionId)` 只预留当前且已平衡的源，任何需要持久修复的源都会被拒绝。`SessionController.resolveDurableSession({ sessionId, workspacePath })` 校验精确 workspace，并通过共享的并发 hydrate 把该 prepared Session 发布到 live registry。它不挂载 Agent，也不追加事件。`resolveDurableSessionSafe()` 把 persistence、身份、workspace 和 registry 发布失败映射为供 Host 消费的稳定无内容错误码。hydrate 与列表可见性刻意分离：恢复绝不调用 `markExternalTaskVisible`。
 
+拥有持久 event type 的仓外插件通过 `SessionStore.registerEventTypes()` 为自身 plugin effect 注册完整名称。只有至少一个 owner 注册有效时，persistence 才接受这些事件；其他外部事件仍失败关闭。这样，精确 hydrate 可以恢复已安装插件的日志，又不会削弱未知事件 guard。
+
 `sessionListMetadata` 投影把 `turn/start` 或 `session/external-task` 视为 Session 非空的证据。投影 state version 同步递增，旧 projection cache 行无法在升级后保留过期 blank 状态。普通 persistence log 和投影重放使该决定在重启后保留，无需可变 Session header 或客户端私有例外。
 
 ## Alternatives considered
