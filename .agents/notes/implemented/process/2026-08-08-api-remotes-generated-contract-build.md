@@ -55,7 +55,7 @@ Host tsdown enables `typertPlugin({ mode: 'workspace', faces: ['host'] })` in th
 
 The Typert analyzer distinguishes compiler faces from runtime faces. Direct Project References in the aggregate determine which compiler face analyzes a project; only a split project explicitly referenced through `tsconfig.host.json` or `tsconfig.client.json` is restricted to that corresponding face. Runtime models follow package subpath contributions instead, so an ordinary single-project `dshClient` package may contribute both Host and Client runtime models. Consequently, Host analysis of `api-remotes` does not also register its Client entry, while an ordinary dual-entry package does not lose its Host model.
 
-Both the Host and Client tsdown passes receive the same complete workspace of `vendor/*`, `packages/*/*`, and `apps/cli`. The root config does not scan `lib/types/client/index.js`, maintain a package classification table, or use a tsdown filter; package-local configs return entries for the current phase according to `DSH_BUILD_FACE`.
+Both the Host and Client tsdown passes receive the same complete workspace of package manifests under `vendor/*`, `packages/*/*`, and `apps/cli`. The root config resolves those manifest owners in deterministic path order before passing exact package directories to tsdown. A directory left behind only by ignored content such as `node_modules` is therefore not a package and cannot inherit the root manifest during workspace discovery. The root config does not scan `lib/types/client/index.js`, maintain a package classification table, or use a tsdown filter; package-local configs return entries for the current phase according to `DSH_BUILD_FACE`.
 
 An ordinary Client plugin returns an empty config during the Host pass and produces both its Node loader entry and browser bundle during the Client pass. The `clientBundle(..., { hostPhase: true })` used by `api-remotes` is the only phase exception: the Host pass produces its Host entry, and the Client pass produces only its browser bundle. Package-local tsdown without `DSH_BUILD_FACE` still returns that package's normal entries together for local single-package development.
 
@@ -73,7 +73,7 @@ An ordinary Client plugin returns an empty config during the Host pass and produ
 
 ## Consequences
 
-A clean build is the authoritative check of ordering correctness: with no existing `/remote` artifacts, Host tsc must succeed first, Host tsdown must generate the contract, and then Client tsc, Client tsdown, and the Web build must succeed. No phase may write artifacts into `src`.
+A clean build is the authoritative check of ordering correctness: with no existing `/remote` artifacts, Host tsc must succeed first, Host tsdown must generate the contract, and then Client tsc, Client tsdown, and the Web build must succeed. No phase may write artifacts into `src`. Copying a source tree may preserve empty parent directories after ignored contents are removed, so package participation depends on the copied manifests rather than directory existence.
 
 The tsc-first ownership established by the [TypeScript build config note](2026-06-17-ts-build-config.md) remains unchanged, but this note replaces its command shape of one whole-graph tsc pass followed by bundling with ordered phases. The ordinary-package single-aggregate rule established by the [two-aggregate solution note](2026-07-22-tsconfig-solution-root-two-aggregates.md) also remains unchanged; this note creates one explicit exception for `api/remotes`.
 
