@@ -608,6 +608,10 @@ export class PersistenceCoordinator<TornMarker = unknown> {
   private retirements = new Map<SessionId, Promise<void>>()
   /** Shared cold reads, unpublished reservations, and completed LRU entries. */
   private readonly preparations: SessionPreparations<PreparedSessionSource<TornMarker>, SessionState>
+  /** Exact read-only reservations whose constructor suffix must wait for a real owner append. */
+  private readonly exactPreparations = new WeakSet<
+    SessionPreparationReservation<PreparedSessionSource<TornMarker>, SessionState>
+  >()
   /**
    * Per-session serialization: every operation chains onto the prior one for the
    * same id, so writes for one session never interleave. Keyed by session id.
@@ -805,8 +809,10 @@ export class PersistenceCoordinator<TornMarker = unknown> {
         this.preparations.release(reservation, false)
         throw new Error(`cannot prepare session "${id}" while it is live`)
       }
+      this.exactPreparations.add(reservation)
       return SessionPreparation.create(reservation.source.session, {
         release: () => {
+          this.exactPreparations.delete(reservation)
           this.preparations.release(
             reservation,
             reservation.state.owner === undefined
@@ -1342,7 +1348,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     return live
   }
 
-  /** Bind one exact prepared Session and persist only its unpublished suffix. */
+  /** Bind one prepared Session, deferring exact-read suffixes until the first owner append. */
   private attachPrepared(
     session: Session,
     reservation: SessionPreparationReservation<PreparedSessionSource<TornMarker>, SessionState>,
@@ -1354,13 +1360,14 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       throw new Error(`session "${session.id}" preparation no longer matches its persistence state`)
     }
     const suffix = session.events.slice(state.cursor).map(event => structuredClone(event))
+    const deferSuffix = this.exactPreparations.delete(reservation)
     this.preparations.attach(reservation)
     state.owner = session
     const live: LiveSessionState = {
       init: Promise.resolve(),
-      writes: this.createWriteBehind(session, () => live.init),
+      writes: this.createWriteBehind(session, () => live.init, deferSuffix ? suffix : []),
     }
-    if (suffix.length > 0) {
+    if (!deferSuffix && suffix.length > 0) {
       live.init = this.serialize(session.id, () => this.appendCore(session.id, suffix))
       live.init.catch(() => { /* observed by flush/dispose through the controller */ })
     }
@@ -1505,13 +1512,25 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     await live.writes.flush()
   }
 
-  /** Build one package-private write controller around initialization and id serialization. */
-  private createWriteBehind(session: Session, ready: () => Promise<void>): SessionWriteBehind {
+  /**
+   * Build one package-private write controller around initialization and id serialization.
+   * An exact hydrate may own constructor-only markers in memory. Those markers remain
+   * read-only until a later owner event supplies the first durable write; an empty flush
+   * or registry rollback therefore cannot touch the source archive.
+   */
+  private createWriteBehind(
+    session: Session,
+    ready: () => Promise<void>,
+    deferredPrefix: readonly SessionEvent[] = [],
+  ): SessionWriteBehind {
+    let prefix = deferredPrefix.map(event => structuredClone(event))
     return new SessionWriteBehind({
       maxDelayMs: this.writeBatchMaxDelayMs,
       write: async (batch) => {
         await ready()
-        await this.serialize(session.header.id, () => this.appendLiveBatch(session.header.id, batch))
+        const combined = prefix.length === 0 ? batch : [...prefix, ...batch]
+        await this.serialize(session.header.id, () => this.appendLiveBatch(session.header.id, combined))
+        prefix = []
       },
       reportBackgroundFailure: (error) => {
         this.ctx.logger.warn(`${this.backend.name}: background write for session "${session.id}" failed (buffered events retained): ${String(error)}`)
