@@ -4,7 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import { canOpenNativePath, openNativePath } from '@deepseek-ai/dsh-native-command'
-import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { Remote, TypertRemoteFailure, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
@@ -49,6 +49,7 @@ import type {
   SessionSelectModelValue,
   SessionUpdateQueueRequest,
   SessionUpdateQueueValue,
+  ExternalTaskSessionMarker,
 } from './types.ts'
 
 export type * from './types.ts'
@@ -158,6 +159,18 @@ export class SessionController extends TypertRemoteService {
       if (event.type !== 'user/message' || event.data.source.kind !== 'user') return
       ctx.emit('api-session/activity', session.id, event.time)
     })
+  }
+
+  /**
+   * Persist one idempotent list-visibility marker for an external task Session.
+   * This operation never appends a model turn or a user/model message.
+   * @param session - live Session owned by the calling Host integration.
+   * @param marker - opaque producer/task correlation.
+   */
+  markExternalTaskVisible(session: Session, marker: ExternalTaskSessionMarker): void {
+    const exists = session.events.some(event => event.type === 'session/external-task'
+      && event.data.producer === marker.producer && event.data.taskId === marker.taskId)
+    if (!exists) session.append('session/external-task', marker)
   }
 
   private promote(observation: SessionObservation): void {

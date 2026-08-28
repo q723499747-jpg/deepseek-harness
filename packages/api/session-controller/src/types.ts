@@ -34,11 +34,26 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
+     * A durable external task owns this Session without opening a model turn.
+     * Session-list projections treat the Session as visible; transcript and
+     * model-history projections continue to ignore this log-only marker.
+     * @mode emit
+     */
+    'session/external-task': ExternalTaskSessionMarker
+    /**
      * Complete validated model selection requested for subsequent prompt
      * assembly. Log-only: it never enters derived model history.
      */
     'model/selection': ModelSelection
   }
+}
+
+/** Opaque correlation for one non-model external task Session. */
+export interface ExternalTaskSessionMarker {
+  /** Stable package or integration owner; not an actor or credential. */
+  readonly producer: string
+  /** Producer-owned opaque task identity. */
+  readonly taskId: string
 }
 
 /** Persisted hints used to summarize a cold Session. */
