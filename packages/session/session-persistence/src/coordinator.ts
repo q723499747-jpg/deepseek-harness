@@ -8,6 +8,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import {
   adoptSessionEvent,
+  ExternalSessionEventEnvelopeUnsupportedError,
   interruptedTurnClosers,
   SESSION_FORMAT_VERSION,
   SessionPreparation,
@@ -547,11 +548,15 @@ function eventMessageId(event: SessionEvent): PersistedMessageId | undefined {
 }
 
 /** Materialize stored events as upgraded, validated snapshots with immutable messages. */
-function snapshotStoredEvents(events: readonly SessionEvent[], id: SessionId): SessionEvent[] {
+function snapshotStoredEvents(
+  events: readonly SessionEvent[],
+  id: SessionId,
+  normalizeEnvelope: (event: SessionEvent) => SessionEvent,
+): SessionEvent[] {
   assertSupportedEvents(events, id)
   const messageIds = new Map<number, PersistedMessageId>()
   return events.map((event) => {
-    const migratedStart = migrateLegacyTurnStartEvent(event, id)
+    const migratedStart = migrateLegacyTurnStartEvent(normalizeEnvelope(event), id)
     const migratedTurn = migrateLegacyTurnEndEvent(migratedStart, id)
     const migratedSteering = migrateLegacySteeringEvent(migratedTurn, id)
     const snapshot = snapshotSessionEvent(migrateLegacyMessageEvent(migratedSteering, id, messageIds))
@@ -562,11 +567,15 @@ function snapshotStoredEvents(events: readonly SessionEvent[], id: SessionId): S
 }
 
 /** Upgrade and validate an exclusively owned backend result without copying it. */
-function adoptStoredEvents(events: SessionEvent[], id: SessionId): SessionEvent[] {
+function adoptStoredEvents(
+  events: SessionEvent[],
+  id: SessionId,
+  normalizeEnvelope: (event: SessionEvent) => SessionEvent,
+): SessionEvent[] {
   assertSupportedEvents(events, id)
   const messageIds = new Map<number, PersistedMessageId>()
   for (const [index, event] of events.entries()) {
-    const migratedStart = migrateLegacyTurnStartEvent(event, id)
+    const migratedStart = migrateLegacyTurnStartEvent(normalizeEnvelope(event), id)
     const migratedTurn = migrateLegacyTurnEndEvent(migratedStart, id)
     const migratedSteering = migrateLegacySteeringEvent(migratedTurn, id)
     const adopted = adoptSessionEvent(migrateLegacyMessageEvent(migratedSteering, id, messageIds))
@@ -980,7 +989,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
         const whole = await this.readStoredPrefix(id, signal)
         return { meta: whole.meta, events: whole.events.filter(event => event.seq >= fromSeq) }
       }
-      const events = snapshotStoredEvents(suffix.events, id)
+      const events = snapshotStoredEvents(
+        suffix.events,
+        id,
+        event => this.normalizeStoredEventEnvelope(suffix.meta, event),
+      )
       this.assertEventsSupported(suffix.meta, events)
       return { meta: structuredClone(suffix.meta), events }
     }
@@ -1000,7 +1013,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     if (stored === undefined) throw new SessionPersistenceNotFoundError(id)
     this.assertStoredId(id, stored.meta)
     this.assertVersion(stored.meta)
-    const events = snapshotStoredEvents(stored.events, id)
+    const events = snapshotStoredEvents(
+      stored.events,
+      id,
+      event => this.normalizeStoredEventEnvelope(stored.meta, event),
+    )
     this.assertEventsSupported(stored.meta, events)
     return {
       meta: structuredClone(stored.meta),
@@ -1016,7 +1033,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       const { meta, events, revision, tornMarker } = stored
       this.assertStoredId(id, meta)
       this.assertVersion(meta)
-      const storedEvents = adoptStoredEvents(events, id)
+      const storedEvents = adoptStoredEvents(
+        events,
+        id,
+        event => this.normalizeStoredEventEnvelope(meta, event),
+      )
       this.assertEventsSupported(meta, storedEvents)
 
       // Preserve complete interrupted events and synthesize only missing closers.
@@ -1176,6 +1197,19 @@ export class PersistenceCoordinator<TornMarker = unknown> {
   private assertVersion(meta: SessionHeader): void {
     if (meta.version === SESSION_FORMAT_VERSION) return
     throw this.unsupported(meta, sessionFormatVersionRefusal(meta.id, meta.version))
+  }
+
+  /** Convert only owner-declared legacy external envelopes to the current in-memory shape. */
+  private normalizeStoredEventEnvelope(meta: SessionHeader, event: SessionEvent): SessionEvent {
+    try {
+      return this.ctx.sessions.normalizeRestoredEventEnvelope(event)
+    } catch (error) {
+      if (!(error instanceof ExternalSessionEventEnvelopeUnsupportedError)) throw error
+      throw this.unsupported(
+        meta,
+        `session "${meta.id}" contains an unsupported envelope extension on event type "${error.eventType}" (seq ${event.seq}); refusing to interpret the log`,
+      )
+    }
   }
 
   /**
@@ -1344,7 +1378,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     /* v8 ignore next -- a cursor > 0 means the session was materialized, so it exists */
     if (stored === undefined) return false
     this.assertStoredId(id, stored.meta)
-    return seedCoversPrefix(seed, snapshotStoredEvents(stored.events, id).slice(0, cursor))
+    return seedCoversPrefix(seed, snapshotStoredEvents(
+      stored.events,
+      id,
+      event => this.normalizeStoredEventEnvelope(stored.meta, event),
+    ).slice(0, cursor))
   }
 
   /**
@@ -1432,7 +1470,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       throw new Error(`session "${session.header.id}" is already persisted at a different cwd (persisted: ${String(meta.cwd)}, live: ${String(session.header.cwd)}) (id collision)`)
     }
     this.assertVersion(meta)
-    const storedEvents = snapshotStoredEvents(events, session.header.id)
+    const storedEvents = snapshotStoredEvents(
+      events,
+      session.header.id,
+      event => this.normalizeStoredEventEnvelope(meta, event),
+    )
     this.assertEventsSupported(meta, storedEvents)
     if (!seedCoversPrefix(seed, storedEvents)) {
       throw new Error(`session "${session.header.id}" already has a persisted log on disk that does not match this live session (id collision)`)

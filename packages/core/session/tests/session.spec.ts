@@ -49,9 +49,51 @@ describe('Session', () => {
       expect(() => ctx.sessions.registerEventTypes({
         owner: 'one-owner', prefix: 'owned/', types: ['owned/changed'],
       })).toThrow(/different vocabulary/)
+      expect(() => ctx.sessions.registerEventTypes({
+        owner: 'one-owner', prefix: 'owned/', types: ['owned/event'],
+        legacyEnvelope: { ignorable: true },
+      })).toThrow(/different vocabulary/)
       owned()
       expect(ctx.sessions.supportsEventType('owned/event')).toBe(false)
     } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('normalizes only an owner-declared exact legacy log-only envelope', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const dispose = ctx.sessions.registerEventTypes({
+      owner: 'legacy-plugin',
+      prefix: 'legacy/',
+      types: ['legacy/event'],
+      legacyEnvelope: { ignorable: true },
+    })
+    const exact = {
+      type: 'legacy/event', seq: 0, time: 1, data: { value: 1 }, ignorable: true,
+    } as unknown as SessionEvent
+    const normalized = ctx.sessions.normalizeRestoredEventEnvelope(exact)
+
+    try {
+      expect(normalized).toEqual({ type: 'legacy/event', seq: 0, time: 1, data: { value: 1 } })
+      expect(exact).toHaveProperty('ignorable', true)
+      for (const rejected of [
+        { ...exact, ignorable: false },
+        { ...exact, ignorable: 'true' },
+        { ...exact, extra: true },
+        { ...exact, surfaceOp: 'append' },
+        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 }, ignorable: true },
+        { type: 'unknown/event', seq: 0, time: 1, data: {}, ignorable: true },
+      ]) {
+        expect(() => ctx.sessions.normalizeRestoredEventEnvelope(rejected as unknown as SessionEvent))
+          .toThrow(/unsupported envelope extension/)
+      }
+      expect(() => ctx.sessions.registerEventTypes({
+        owner: 'invalid-legacy', prefix: 'invalid/', types: ['invalid/event'],
+        legacyEnvelope: { ignorable: false },
+      } as never)).toThrow(/invalid legacy envelope declaration/)
+    } finally {
+      dispose()
       await ctx.fiber.dispose()
     }
   })

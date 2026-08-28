@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/proposed/feature/2026-08-28-external-task-session-visibility.md
-2026-08-28-external-task-session-visibility.md: b2abde87a52e48d0de8c36b77e5493126c83089f
-2026-08-28-external-task-session-visibility.zh.md: 56698caf3a54513e68a4cdd6576a388a99c0a34c
+2026-08-28-external-task-session-visibility.md: 99c6d9b777cefa6b1b045c62418c265dd452b3c4
+2026-08-28-external-task-session-visibility.zh.md: 94eba3054a1126012fabe455938c53ee4fcddda7

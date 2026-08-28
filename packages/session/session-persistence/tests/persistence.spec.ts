@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore, { Session, SessionId, isJsonValue } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
@@ -12,6 +13,12 @@ import { runCoordinatorContract, type CoordinatorFixture } from './coordinator-c
 
 /** The durable store shape: materialized sessions only (no lazy entries). */
 type MemoryStore = Map<string, { meta: SessionHeader; events: SessionEvent[] }>
+
+/** Sanitized structural fixture copied from the immutable attempt4 archive envelope. */
+const ATTEMPT4_LEGACY_EXTERNAL_EVENTS = JSON.parse(readFileSync(
+  new URL('./fixtures/attempt4-legacy-external-events.json', import.meta.url),
+  'utf8',
+)) as SessionEvent[]
 
 /** Test-store revision that changes for any metadata or event mutation. */
 function memoryRevision(entry: { meta: SessionHeader; events: SessionEvent[] }): SessionPersistenceRevision {
@@ -295,6 +302,71 @@ runCoordinatorContract('memory', async (): Promise<CoordinatorFixture> => {
     mount: async ctx => ctx.plugin(MemoryPersistence, { store }),
     cleanup: async () => { store.clear() },
   }
+})
+
+describe('PersistenceCoordinator registered legacy external envelopes', () => {
+  it('normalizes attempt4 in memory without rewriting raw storage and distinguishes unsupported extensions', async () => {
+    const ctx = new Context()
+    const store: MemoryStore = new Map()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(MemoryPersistence, { store })
+    const id = SessionId('attempt4-legacy-envelope')
+    const header = meta(id, '/w')
+    store.set(id, {
+      meta: structuredClone(header),
+      events: structuredClone(ATTEMPT4_LEGACY_EXTERNAL_EVENTS),
+    })
+    const dispose = ctx.sessions.registerEventTypes({
+      owner: 'dsh-langoclaw-skill',
+      prefix: 'langoClaw-skill/',
+      types: [
+        'langoClaw-skill/start',
+        'langoClaw-skill/user-input',
+        'langoClaw-skill/text',
+        'langoClaw-skill/card',
+        'langoClaw-skill/handoff',
+        'langoClaw-skill/error',
+        'langoClaw-skill/terminal',
+        'langoClaw-skill/activate',
+        'langoClaw-skill/direct',
+      ],
+      legacyEnvelope: { ignorable: true },
+    })
+
+    try {
+      const before = JSON.stringify(store.get(id))
+      const loaded = await ctx.sessionPersistence.load(id)
+      expect(loaded.events.map(event => event.type)).toEqual(ATTEMPT4_LEGACY_EXTERNAL_EVENTS.map(event => event.type))
+      expect(loaded.events.some(event => Object.hasOwn(event, 'ignorable'))).toBe(false)
+      expect(loaded.events.some(event => ['turn/start', 'user/message', 'assistant/message'].includes(event.type))).toBe(false)
+      expect(JSON.stringify(store.get(id))).toBe(before)
+
+      const unsupportedId = SessionId('attempt4-unsupported-extension')
+      store.set(unsupportedId, {
+        meta: meta(unsupportedId, '/w'),
+        events: structuredClone(ATTEMPT4_LEGACY_EXTERNAL_EVENTS).map((event, index) => index === 3
+          ? { ...event, ignorable: false } as unknown as SessionEvent
+          : event),
+      })
+      await expect(ctx.sessionPersistence.load(unsupportedId)).rejects.toMatchObject({
+        name: 'SessionFormatUnsupportedError',
+      })
+
+      const corruptId = SessionId('attempt4-true-corruption')
+      store.set(corruptId, {
+        meta: meta(corruptId, '/w'),
+        events: structuredClone(ATTEMPT4_LEGACY_EXTERNAL_EVENTS).map((event, index) => index === 7
+          ? { ...event, seq: 9 }
+          : event),
+      })
+      await expect(ctx.sessionPersistence.load(corruptId)).rejects.toMatchObject({
+        name: 'SessionPersistenceCorruptionError',
+      })
+    } finally {
+      dispose()
+      await ctx.fiber.dispose()
+    }
+  })
 })
 
 describe('PersistenceCoordinator seed ownership', () => {

@@ -11,6 +11,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
  */
 
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import SessionStore, { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -39,6 +40,12 @@ export interface CoordinatorFixture {
 /** A constant absolute cwd; jsonl keys directories off it, memory/sqlite ignore it. */
 const WORK = '/w'
 const OTHER = '/other'
+
+/** Sanitized structural fixture copied from the immutable attempt4 archive envelope. */
+const ATTEMPT4_LEGACY_EXTERNAL_EVENTS = JSON.parse(readFileSync(
+  new URL('./fixtures/attempt4-legacy-external-events.json', import.meta.url),
+  'utf8',
+)) as SessionEvent[]
 
 /** Append a whole event log to a live session, event by event (drives session/event). */
 function send(session: Session, events: readonly SessionEvent[]): void {
@@ -1400,6 +1407,43 @@ export function runCoordinatorContract(name: string, makeFixture: () => Promise<
         second()
         await expect(ctx.sessionPersistence.load(required.id))
           .rejects.toThrow(/event type "external\/task-event".*unknown to this harness/)
+      } finally {
+        await fiber.dispose()
+        await fix.cleanup()
+      }
+    })
+
+    it('loads the attempt4 legacy log-only envelope only for its exact owner declaration', async () => {
+      const fix = await makeFixture()
+      const { ctx, fiber } = await freshCtx(fix)
+      try {
+        const required = meta('attempt4-legacy-log-only', WORK)
+        await ctx.sessionPersistence.create(required)
+        await ctx.sessionPersistence.append(required.id, ATTEMPT4_LEGACY_EXTERNAL_EVENTS)
+        const dispose = ctx.sessions.registerEventTypes({
+          owner: 'dsh-langoclaw-skill',
+          prefix: 'langoClaw-skill/',
+          types: [
+            'langoClaw-skill/start',
+            'langoClaw-skill/user-input',
+            'langoClaw-skill/text',
+            'langoClaw-skill/card',
+            'langoClaw-skill/handoff',
+            'langoClaw-skill/error',
+            'langoClaw-skill/terminal',
+            'langoClaw-skill/activate',
+            'langoClaw-skill/direct',
+          ],
+          legacyEnvelope: { ignorable: true },
+        })
+        const loaded = await ctx.sessionPersistence.load(required.id)
+        expect(loaded.events.map(event => event.type)).toEqual(ATTEMPT4_LEGACY_EXTERNAL_EVENTS.map(event => event.type))
+        expect(loaded.events.some(event => Object.hasOwn(event, 'ignorable'))).toBe(false)
+        expect(loaded.events.some(event => ['turn/start', 'user/message', 'assistant/message'].includes(event.type))).toBe(false)
+        dispose()
+        await expect(ctx.sessionPersistence.load(required.id)).rejects.toMatchObject({
+          name: 'SessionFormatUnsupportedError',
+        })
       } finally {
         await fiber.dispose()
         await fix.cleanup()

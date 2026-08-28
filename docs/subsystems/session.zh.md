@@ -792,6 +792,16 @@ registerEventTypes(registration: ExternalSessionEventTypeRegistration): () => vo
 supportsEventType(type: string): boolean
 
 /**
+ * Normalize one stored event through its active external owner's exact legacy
+ * envelope declaration. The input artifact is never mutated. Built-in and
+ * unregistered types cannot use this compatibility path, and external events
+ * remain log-only: surface metadata plus the legacy marker is refused.
+ * @param event - detached event read from persistence.
+ * @returns the same current envelope, or a copy without exact `ignorable: true`.
+ */
+normalizeRestoredEventEnvelope(event: SessionEvent): SessionEvent
+
+/**
  * Create a session owned by the calling fiber: disposing that fiber stops
  * event notification and removes the session from the store. `options.seed`
  * populates the session with a copy of those events (replay/fork);

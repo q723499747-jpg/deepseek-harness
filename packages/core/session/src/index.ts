@@ -790,13 +790,31 @@ export interface ExternalSessionEventTypeRegistration {
   readonly prefix: string
   /** Complete event vocabulary owned under the prefix. */
   readonly types: readonly string[]
+  /** Exact obsolete envelope shape this log-only owner can read without rewriting storage. */
+  readonly legacyEnvelope?: {
+    /** Accept only an exact historical `ignorable: true` marker during in-memory restore. */
+    readonly ignorable: true
+  }
 }
 
 interface ActiveExternalEventTypeOwner {
   readonly signature: string
   readonly types: readonly string[]
+  readonly legacyIgnorable: boolean
   count: number
 }
+
+/** A stored event carries an envelope extension not declared by its active owner. */
+export class ExternalSessionEventEnvelopeUnsupportedError extends Error {
+  constructor(readonly eventType: string) {
+    super(`session event type "${eventType}" carries an unsupported envelope extension`)
+    this.name = 'ExternalSessionEventEnvelopeUnsupportedError'
+  }
+}
+
+const CURRENT_SESSION_EVENT_ENVELOPE_KEYS = new Set([
+  'type', 'seq', 'time', 'data', 'surfaceOp', 'sourceEventSeqs',
+])
 
 /**
  * In-memory session store (`ctx.sessions`).
@@ -833,6 +851,7 @@ export class SessionStore extends Service {
    */
   registerEventTypes(registration: ExternalSessionEventTypeRegistration): () => void {
     const { owner, prefix, types } = registration
+    const legacyEnvelope: unknown = (registration as unknown as Record<string, unknown>)['legacyEnvelope']
     if (!/^[A-Za-z0-9@][A-Za-z0-9@._/-]{0,127}$/.test(owner)) {
       throw new Error('session event type registration has an invalid owner')
     }
@@ -841,6 +860,15 @@ export class SessionStore extends Service {
     }
     if (types.length === 0 || types.length > 128) {
       throw new Error('session event type registration must contain between 1 and 128 types')
+    }
+    if (legacyEnvelope !== undefined && (
+      typeof legacyEnvelope !== 'object'
+      || legacyEnvelope === null
+      || Array.isArray(legacyEnvelope)
+      || Object.keys(legacyEnvelope).length !== 1
+      || (legacyEnvelope as Record<string, unknown>)['ignorable'] !== true
+    )) {
+      throw new Error('session event type registration has an invalid legacy envelope declaration')
     }
     const unique = new Set(types)
     if (unique.size !== types.length) throw new Error('session event type registration contains duplicates')
@@ -856,7 +884,8 @@ export class SessionStore extends Service {
       }
     }
     const normalizedTypes = [...unique].sort()
-    const signature = JSON.stringify({ prefix, types: normalizedTypes })
+    const legacyIgnorable = legacyEnvelope !== undefined
+    const signature = JSON.stringify({ prefix, types: normalizedTypes, legacyIgnorable })
     const activeOwner = this.externalEventOwners.get(owner)
     if (activeOwner !== undefined && activeOwner.signature !== signature) {
       throw new Error('session event type owner already registered a different vocabulary')
@@ -868,7 +897,7 @@ export class SessionStore extends Service {
       }
     }
     if (activeOwner === undefined) {
-      this.externalEventOwners.set(owner, { signature, types: normalizedTypes, count: 1 })
+      this.externalEventOwners.set(owner, { signature, types: normalizedTypes, legacyIgnorable, count: 1 })
       for (const type of normalizedTypes) this.externalEventTypes.set(type, owner)
     } else {
       activeOwner.count += 1
@@ -893,6 +922,34 @@ export class SessionStore extends Service {
    */
   supportsEventType(type: string): boolean {
     return KNOWN_SESSION_EVENT_TYPES.has(type) || this.externalEventTypes.has(type)
+  }
+
+  /**
+   * Normalize one stored event through its active external owner's exact legacy
+   * envelope declaration. The input artifact is never mutated. Built-in and
+   * unregistered types cannot use this compatibility path, and external events
+   * remain log-only: surface metadata plus the legacy marker is refused.
+   * @param event - detached event read from persistence.
+   * @returns the same current envelope, or a copy without exact `ignorable: true`.
+   */
+  normalizeRestoredEventEnvelope(event: SessionEvent): SessionEvent {
+    const record = event as unknown as Record<string, unknown>
+    const eventType = typeof record['type'] === 'string' ? record['type'] : '<invalid>'
+    const extensions = Object.keys(record).filter(key => !CURRENT_SESSION_EVENT_ENVELOPE_KEYS.has(key))
+    if (extensions.length === 0) return event
+    const owner = this.externalEventTypes.get(eventType)
+    const activeOwner = owner === undefined ? undefined : this.externalEventOwners.get(owner)
+    if (extensions.length !== 1
+      || extensions[0] !== 'ignorable'
+      || record['ignorable'] !== true
+      || record['surfaceOp'] !== undefined
+      || record['sourceEventSeqs'] !== undefined
+      || activeOwner?.legacyIgnorable !== true) {
+      throw new ExternalSessionEventEnvelopeUnsupportedError(eventType)
+    }
+    const normalized = { ...record }
+    delete normalized['ignorable']
+    return normalized as unknown as SessionEvent
   }
 
   /**

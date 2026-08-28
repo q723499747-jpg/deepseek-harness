@@ -1805,6 +1805,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'true for a built-in or currently registered plugin event.',
       },
       {
+        signature: 'normalizeRestoredEventEnvelope(event: SessionEvent): SessionEvent',
+        description: 'Normalize one stored event through its active external owner\'s exact legacy envelope declaration. The input artifact is never mutated. Built-in and unregistered types cannot use this compatibility path, and external events remain log-only: surface metadata plus the legacy marker is refused.',
+        parameters: [{ name: 'event', description: 'detached event read from persistence.' }],
+        returns: 'the same current envelope, or a copy without exact `ignorable: true`.',
+      },
+      {
         signature: 'create(id?: SessionId, options?: CreateSessionOptions): Session',
         description: 'Create a session owned by the calling fiber: disposing that fiber stops event notification and removes the session from the store. `options.seed` populates the session with a copy of those events (replay/fork); `options.meta` attaches creation metadata (validated absolute `cwd`, seed and parent lineage, and delegation depth) as the immutable SessionHeader (the store fills `version`/`id`/`createdAt`).\n\nFor an agent whose session must be torn down IN ORDER with its loop (so the loop\'s final events are published before the store attachment ends), do NOT use this — fold the session lifecycle into the agent\'s own effect via prepare + enter + announce (see `dsh-agent-loop`\'s creation transaction).',
         parameters: [{ name: 'id', description: 'the session id; omitted, the store mints `session-<n>`.' }, { name: 'options', description: 'seed events and/or creation metadata for the header.' }],
@@ -4019,7 +4025,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ExternalSessionEventTypeRegistration',
-    declaration: 'export interface ExternalSessionEventTypeRegistration {\n    readonly owner: string;\n    readonly prefix: string;\n    readonly types: readonly string[];\n}',
+    declaration: 'export interface ExternalSessionEventTypeRegistration {\n    readonly owner: string;\n    readonly prefix: string;\n    readonly types: readonly string[];\n    readonly legacyEnvelope?: {\n        readonly ignorable: true;\n    };\n}',
   },
   {
     name: 'ExternalTaskSessionMarker',
