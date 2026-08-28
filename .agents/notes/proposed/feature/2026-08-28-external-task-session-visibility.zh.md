@@ -16,7 +16,7 @@ Host 重启后，同一持久 Session 还可能不在内存 registry。复用任
 
 `SessionController.markExternalTaskVisible(session, marker)` 幂等追加一条 `session/external-task` 事件。标记只携带 producer 名称和不透明 task id。它是 log-only：模型历史、token 统计和回合生命周期都会忽略它。
 
-`SessionPersistence.prepareExact(sessionId)` 只预留当前且已平衡的源，任何需要持久修复的源都会被拒绝。`SessionController.resolveDurableSession({ sessionId, workspacePath })` 校验精确 workspace，并通过共享的并发 hydrate 把该 prepared Session 发布到 live registry。它不挂载 Agent，也不追加事件。hydrate 与列表可见性刻意分离：恢复绝不调用 `markExternalTaskVisible`。
+`SessionPersistence.prepareExact(sessionId)` 只预留当前且已平衡的源，任何需要持久修复的源都会被拒绝。`SessionController.resolveDurableSession({ sessionId, workspacePath })` 校验精确 workspace，并通过共享的并发 hydrate 把该 prepared Session 发布到 live registry。它不挂载 Agent，也不追加事件。`resolveDurableSessionSafe()` 把 persistence、身份、workspace 和 registry 发布失败映射为供 Host 消费的稳定无内容错误码。hydrate 与列表可见性刻意分离：恢复绝不调用 `markExternalTaskVisible`。
 
 `sessionListMetadata` 投影把 `turn/start` 或 `session/external-task` 视为 Session 非空的证据。投影 state version 同步递增，旧 projection cache 行无法在升级后保留过期 blank 状态。普通 persistence log 和投影重放使该决定在重启后保留，无需可变 Session header 或客户端私有例外。
 
@@ -39,7 +39,7 @@ Host 重启后，同一持久 Session 还可能不在内存 registry。复用任
 - 持久投影重放在重启后保持 Session 可见。
 - 普通 blank Session 与模型回合 Session 的行为不变。
 - 已平衡的冷 Session 可在精确 workspace 中 hydrate 到 registry，且不改变持久制品、不挂载 Agent。
-- 缺失、损坏、错误 workspace 和需要修复的源都会失败关闭；并发 hydrate 只发布一个精确 Session。
+- 缺失、损坏、错误 workspace、身份不一致和需要修复的源都会以稳定错误码失败关闭；并发 hydrate 只发布一个精确 Session。
 - 单独 hydrate 不改变列表可见性和事件日志。
 
 ## Risks

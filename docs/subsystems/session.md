@@ -617,6 +617,14 @@ markExternalTaskVisible(session: Session, marker: ExternalTaskSessionMarker): vo
 resolveDurableSession( request: DurableSessionResolveRequest, signal?: AbortSignal, ): Promise<DurableSessionResolveResult>
 
 /**
+ * Resolve one durable Session with a bounded classification safe for Host consumers.
+ * @param request - exact durable identity and authorized workspace.
+ * @param signal - optional cancellation before registry publication.
+ * @returns the resolved Session or a content-free failure code.
+ */
+async resolveDurableSessionSafe( request: DurableSessionResolveRequest, signal?: AbortSignal, ): Promise<DurableSessionSafeResolveResult>
+
+/**
  * Resolve or resume one ordinary Session for another Host API domain.
  * @param sessionId - Session identity whose Agent owns the operation.
  * @returns the live Agent or the stable Session-domain failure.

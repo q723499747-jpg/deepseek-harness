@@ -16,7 +16,7 @@ Appending `turn/start` or `user/message` would misrepresent an external process 
 
 `SessionController.markExternalTaskVisible(session, marker)` appends one idempotent `session/external-task` event. The marker carries only a producer name and an opaque task id. It is log-only: model history, token accounting, and turn lifecycle ignore it.
 
-`SessionPersistence.prepareExact(sessionId)` reserves only a current balanced source and rejects any source that needs durable repair. `SessionController.resolveDurableSession({ sessionId, workspacePath })` validates the exact workspace and publishes that prepared Session into the live registry through one shared concurrent hydration. It mounts no Agent and appends no event. Hydration and list visibility are deliberately independent: recovery never calls `markExternalTaskVisible`.
+`SessionPersistence.prepareExact(sessionId)` reserves only a current balanced source and rejects any source that needs durable repair. `SessionController.resolveDurableSession({ sessionId, workspacePath })` validates the exact workspace and publishes that prepared Session into the live registry through one shared concurrent hydration. It mounts no Agent and appends no event. `resolveDurableSessionSafe()` maps persistence, identity, workspace, and registry-publication failures to stable content-free codes for Host consumers. Hydration and list visibility are deliberately independent: recovery never calls `markExternalTaskVisible`.
 
 The `sessionListMetadata` projection treats either `turn/start` or `session/external-task` as evidence that a Session is not blank. Its state version increments so old projection-cache rows cannot preserve obsolete blankness after upgrade. The ordinary persistence log and projection replay make the decision survive restart without a mutable Session header or client-only exception.
 
@@ -39,7 +39,7 @@ The `sessionListMetadata` projection treats either `turn/start` or `session/exte
 - Persisted projection replay keeps the Session visible after restart.
 - Ordinary blank and model-turn Sessions retain their current behavior.
 - A balanced cold Session can be hydrated into the registry for its exact workspace without changing its durable artifact or mounting an Agent.
-- Missing, corrupt, wrong-workspace, and repair-requiring sources fail closed; concurrent hydration publishes one exact Session.
+- Missing, corrupt, wrong-workspace, identity-mismatched, and repair-requiring sources fail closed with stable codes; concurrent hydration publishes one exact Session.
 - Hydration alone leaves list visibility and the event log unchanged.
 
 ## Risks

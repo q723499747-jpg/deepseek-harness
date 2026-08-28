@@ -1340,6 +1340,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the live exact Session and whether this call hydrated it.',
       },
       {
+        signature: 'async resolveDurableSessionSafe( request: DurableSessionResolveRequest, signal?: AbortSignal, ): Promise<DurableSessionSafeResolveResult>',
+        description: 'Resolve one durable Session with a bounded classification safe for Host consumers.',
+        parameters: [{ name: 'request', description: 'exact durable identity and authorized workspace.' }, { name: 'signal', description: 'optional cancellation before registry publication.' }],
+        returns: 'the resolved Session or a content-free failure code.',
+      },
+      {
         signature: 'resolveAgent(sessionId: SessionId): Promise<ApiSessionAgentResult>',
         description: 'Resolve or resume one ordinary Session for another Host API domain.',
         parameters: [{ name: 'sessionId', description: 'Session identity whose Agent owns the operation.' }],
@@ -3956,12 +3962,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type DshEnvironmentKey = `${typeof DSH_ENV_PREFIX}${string}`;',
   },
   {
+    name: 'DurableSessionResolveFailureCode',
+    declaration: 'export type DurableSessionResolveFailureCode = \'NOT_FOUND\' | \'WORKSPACE_MISMATCH\' | \'SESSION_ID_MISMATCH\' | \'RECOVERY_REQUIRED\' | \'CORRUPT\' | \'UNSUPPORTED_FORMAT\' | \'PERSISTENCE_UNAVAILABLE\' | \'REGISTRY_PUBLISH_FAILED\' | \'UNKNOWN\';',
+  },
+  {
     name: 'DurableSessionResolveRequest',
     declaration: 'export interface DurableSessionResolveRequest {\n    readonly sessionId: SessionId;\n    readonly workspacePath: string;\n}',
   },
   {
     name: 'DurableSessionResolveResult',
     declaration: 'export interface DurableSessionResolveResult {\n    readonly session: Session;\n    readonly disposition: \'live\' | \'hydrated\';\n}',
+  },
+  {
+    name: 'DurableSessionSafeResolveResult',
+    declaration: 'export type DurableSessionSafeResolveResult = ({\n    readonly ok: true;\n} & DurableSessionResolveResult) | {\n    readonly ok: false;\n    readonly code: DurableSessionResolveFailureCode;\n};',
   },
   {
     name: 'DynamicCordisPackage',

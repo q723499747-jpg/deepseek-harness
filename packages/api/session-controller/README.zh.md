@@ -29,7 +29,7 @@ kind: "package-reference"
 
 不经过模型回合执行外部任务的 Host 集成调用 `ctx.sessionController.markExternalTaskVisible(session, marker)`。该方法幂等追加一条 log-only `session/external-task` 标记，使 Session 列表和重启恢复保留任务，同时不改变模型历史；调用方仍负责自身任务事件和可见卡片。
 
-已经拥有持久 Session 的集成可独立调用 `ctx.sessionController.resolveDurableSession({ sessionId, workspacePath })`。Host 校验精确 workspace、共享并发 hydrate，并把持久 Session 发布到 live registry；该过程不挂载 Agent、不追加事件、不标记列表可见，也不调用模型。若日志需要崩溃修复，persistence 会拒绝这条只读路径而不是修改日志。列表可见性仍是后续显式调用 `markExternalTaskVisible` 的独立决定。
+已经拥有持久 Session 的集成可独立调用 `ctx.sessionController.resolveDurableSession({ sessionId, workspacePath })`。Host 校验精确 workspace、共享并发 hydrate，并把持久 Session 发布到 live registry；该过程不挂载 Agent、不追加事件、不标记列表可见，也不调用模型。若日志需要崩溃修复，persistence 会拒绝这条只读路径而不是修改日志。`resolveDurableSessionSafe()` 以有界的 `{ ok, code }` 结果向 Host 集成提供同一操作，不暴露 archive 内容、位置或底层异常文本。列表可见性仍是后续显式调用 `markExternalTaskVisible` 的独立决定。
 
 Client adapter 提供 `SessionEventStream`，即绑定到一个普通 Session 或 direct subagent address 的 Gateway `RemoteJournalStream`。它在读取首个 page 前打开 follow，只发布连续的 `replace`、`prepend` 和 `append` 变更，并通过 tail page 修复重连或 seq 缺口。普通 record 覆盖 `[event.seq, event.seq]`，packed row 覆盖 `[event.seq, event.seq + memberCount - 1]`。业务、persistence 或无法恢复的连续性错误会终止 stream，只有物理载体断开才触发自动恢复。`SessionControlStream` 是 Gateway `RemoteSnapshotStream`；每代都以完整的进程本地 baseline 开始，因此重连会替换 queue、jobs 和 projection 状态，而不会把瞬态值当作 durable event。
 

@@ -5,7 +5,13 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import { canOpenNativePath, openNativePath } from '@deepseek-ai/dsh-native-command'
-import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import {
+  SessionFormatUnsupportedError,
+  SessionPersistenceCorruptionError,
+  SessionPersistenceNotFoundError,
+  SessionPersistenceRecoveryRequiredError,
+} from '@deepseek-ai/dsh-session-persistence'
+import type { Session, SessionEvent, SessionHeader, SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
 import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { Remote, TypertRemoteFailure, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
@@ -97,6 +103,23 @@ export interface DurableSessionResolveResult {
   readonly disposition: 'live' | 'hydrated'
 }
 
+/** Content-free reason an exact durable Session could not enter the live registry. */
+export type DurableSessionResolveFailureCode =
+  | 'NOT_FOUND'
+  | 'WORKSPACE_MISMATCH'
+  | 'SESSION_ID_MISMATCH'
+  | 'RECOVERY_REQUIRED'
+  | 'CORRUPT'
+  | 'UNSUPPORTED_FORMAT'
+  | 'PERSISTENCE_UNAVAILABLE'
+  | 'REGISTRY_PUBLISH_FAILED'
+  | 'UNKNOWN'
+
+/** Host-safe exact durable Session result without persistence diagnostics. */
+export type DurableSessionSafeResolveResult =
+  | ({ readonly ok: true } & DurableSessionResolveResult)
+  | { readonly ok: false; readonly code: DurableSessionResolveFailureCode }
+
 /** Stable fail-closed reason from the same-process durable Session seam. */
 export class DurableSessionResolveError extends Error {
   /**
@@ -105,7 +128,7 @@ export class DurableSessionResolveError extends Error {
    * @param options - underlying persistence or validation failure.
    */
   constructor(
-    readonly code: 'persistence-unavailable' | 'workspace-mismatch' | 'session-mismatch',
+    readonly code: DurableSessionResolveFailureCode,
     message: string,
     options?: ErrorOptions,
   ) {
@@ -243,6 +266,23 @@ export class SessionController extends TypertRemoteService {
     return hydration
   }
 
+  /**
+   * Resolve one durable Session with a bounded classification safe for Host consumers.
+   * @param request - exact durable identity and authorized workspace.
+   * @param signal - optional cancellation before registry publication.
+   * @returns the resolved Session or a content-free failure code.
+   */
+  async resolveDurableSessionSafe(
+    request: DurableSessionResolveRequest,
+    signal?: AbortSignal,
+  ): Promise<DurableSessionSafeResolveResult> {
+    try {
+      return { ok: true, ...await this.resolveDurableSession(request, signal) }
+    } catch (error) {
+      return { ok: false, code: this.classifyDurableSessionFailure(error).code }
+    }
+  }
+
   /** Prepare, validate, and publish one cold Session without durable mutation. */
   private async hydrateDurableSession(
     sessionId: SessionId,
@@ -252,17 +292,20 @@ export class SessionController extends TypertRemoteService {
     const persistence = this.ctx.get('sessionPersistence')
     if (persistence === undefined) {
       throw new DurableSessionResolveError(
-        'persistence-unavailable',
+        'PERSISTENCE_UNAVAILABLE',
         `cannot hydrate session "${sessionId}": session persistence is not configured`,
       )
     }
     signal?.throwIfAborted()
-    using preparation = await persistence.prepareExact(sessionId, signal)
+    let preparation: SessionPreparation
+    try { preparation = await persistence.prepareExact(sessionId, signal) }
+    catch (error) { throw this.classifyDurableSessionFailure(error) }
+    using ownedPreparation = preparation
     signal?.throwIfAborted()
-    const prepared = preparation.session
+    const prepared = ownedPreparation.session
     if (prepared.id !== sessionId || prepared.header.id !== sessionId) {
       throw new DurableSessionResolveError(
-        'session-mismatch',
+        'SESSION_ID_MISMATCH',
         `cannot hydrate session "${sessionId}": persistence returned a different identity`,
       )
     }
@@ -272,10 +315,18 @@ export class SessionController extends TypertRemoteService {
       this.assertWorkspace(sessionId, raced.header, workspacePath)
       return { session: raced, disposition: 'live' }
     }
-    this.ctx.effect(function* (this: SessionController) {
-      yield this.ctx.sessions.enter(prepared)
-      this.ctx.sessions.announce(prepared)
-    }.bind(this), `session-controller hydrate ${sessionId}`)
+    try {
+      this.ctx.effect(function* (this: SessionController) {
+        yield this.ctx.sessions.enter(prepared)
+        this.ctx.sessions.announce(prepared)
+      }.bind(this), `session-controller hydrate ${sessionId}`)
+    } catch (error) {
+      throw new DurableSessionResolveError(
+        'REGISTRY_PUBLISH_FAILED',
+        'durable session registry publication failed',
+        { cause: error },
+      )
+    }
     return { session: prepared, disposition: 'hydrated' }
   }
 
@@ -283,7 +334,7 @@ export class SessionController extends TypertRemoteService {
   private validateWorkspacePath(sessionId: SessionId, workspacePath: string): string {
     if (workspacePath.length === 0 || !isAbsolute(workspacePath)) {
       throw new DurableSessionResolveError(
-        'workspace-mismatch',
+        'WORKSPACE_MISMATCH',
         `cannot hydrate session "${sessionId}": workspace path must be absolute`,
       )
     }
@@ -298,10 +349,46 @@ export class SessionController extends TypertRemoteService {
   ): void {
     if (header.cwd === undefined || normalize(header.cwd) !== workspacePath) {
       throw new DurableSessionResolveError(
-        'workspace-mismatch',
+        'WORKSPACE_MISMATCH',
         `cannot hydrate session "${sessionId}": durable workspace does not match the requested workspace`,
       )
     }
+  }
+
+  /** Collapse persistence and registry errors to a stable, content-free Host code. */
+  private classifyDurableSessionFailure(error: unknown): DurableSessionResolveError {
+    if (error instanceof DurableSessionResolveError) return error
+    if (error instanceof SessionPersistenceNotFoundError) {
+      return new DurableSessionResolveError(
+        'NOT_FOUND',
+        'durable session was not found',
+        { cause: error },
+      )
+    }
+    if (error instanceof SessionPersistenceRecoveryRequiredError) {
+      return new DurableSessionResolveError(
+        'RECOVERY_REQUIRED',
+        'durable session requires write-side recovery',
+        { cause: error },
+      )
+    }
+    if (error instanceof SessionPersistenceCorruptionError) {
+      return new DurableSessionResolveError(
+        'CORRUPT',
+        'durable session failed validation',
+        { cause: error },
+      )
+    }
+    if (error instanceof SessionFormatUnsupportedError) {
+      return new DurableSessionResolveError(
+        'UNSUPPORTED_FORMAT',
+        'durable session format is unsupported',
+        { cause: error },
+      )
+    }
+    return new DurableSessionResolveError('UNKNOWN', 'durable session resolution failed', {
+      cause: error instanceof Error ? error : undefined,
+    })
   }
 
   private promote(observation: SessionObservation): void {

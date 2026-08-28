@@ -6,6 +6,12 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import {
+  SessionFormatUnsupportedError,
+  SessionPersistenceCorruptionError,
+  SessionPersistenceNotFoundError,
+  SessionPersistenceRecoveryRequiredError,
+} from '@deepseek-ai/dsh-session-persistence'
+import {
   DurableSessionResolveError,
   type SessionController,
 } from '../src/index.ts'
@@ -22,7 +28,7 @@ interface HydrationHarness {
 }
 
 async function harness(
-  options: { readonly returnedId?: string; readonly cwd?: string } = {},
+  options: { readonly returnedId?: string; readonly cwd?: string; readonly providePersistence?: boolean } = {},
 ): Promise<HydrationHarness> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
@@ -36,7 +42,7 @@ async function harness(
   })
   const release = vi.fn()
   const prepareExact = vi.fn(async () => SessionPreparation.create(prepared, { release }))
-  ctx.provide('sessionPersistence', { prepareExact } as never)
+  if (options.providePersistence !== false) ctx.provide('sessionPersistence', { prepareExact } as never)
   const controller = createSessionTestController(ctx, {
     defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
     cwd: WORKSPACE,
@@ -78,7 +84,7 @@ describe('SessionController.resolveDurableSession', () => {
 
     try {
       await expect(h.controller.resolveDurableSession({ sessionId, workspacePath: '/workspace/wrong' }))
-        .rejects.toMatchObject({ code: 'workspace-mismatch' })
+        .rejects.toMatchObject({ code: 'WORKSPACE_MISMATCH' })
       expect(h.ctx.sessions.get(sessionId)).toBeUndefined()
 
       await expect(h.controller.resolveDurableSession({ sessionId, workspacePath: WORKSPACE }))
@@ -86,7 +92,7 @@ describe('SessionController.resolveDurableSession', () => {
       expect(() => h.controller.resolveDurableSession({ sessionId, workspacePath: 'relative' }))
         .toThrow(DurableSessionResolveError)
       expect(() => h.controller.resolveDurableSession({ sessionId, workspacePath: '/workspace/wrong' }))
-        .toThrow(expect.objectContaining({ code: 'workspace-mismatch' }))
+        .toThrow(expect.objectContaining({ code: 'WORKSPACE_MISMATCH' }))
       expect(h.prepareExact).toHaveBeenCalledTimes(2)
     } finally {
       await h.ctx.fiber.dispose()
@@ -99,7 +105,7 @@ describe('SessionController.resolveDurableSession', () => {
 
     try {
       await expect(h.controller.resolveDurableSession({ sessionId, workspacePath: WORKSPACE }))
-        .rejects.toMatchObject({ code: 'session-mismatch' })
+        .rejects.toMatchObject({ code: 'SESSION_ID_MISMATCH' })
       expect(h.ctx.sessions.get(sessionId)).toBeUndefined()
       expect(h.ctx.sessions.get(SessionId('different-session'))).toBeUndefined()
       expect(h.release).toHaveBeenCalledTimes(1)
@@ -108,20 +114,62 @@ describe('SessionController.resolveDurableSession', () => {
     }
   })
 
-  it('keeps persistence failures fail closed and retryable by a later explicit resolution', async () => {
+  it('classifies persistence failures without exposing their contents', async () => {
     const h = await harness()
     const sessionId = SessionId('durable-task')
-    h.prepareExact.mockRejectedValueOnce(new Error('durable source missing or corrupt'))
+    const failures = [
+      [new SessionPersistenceNotFoundError(sessionId), 'NOT_FOUND'],
+      [new SessionPersistenceRecoveryRequiredError(sessionId), 'RECOVERY_REQUIRED'],
+      [new SessionPersistenceCorruptionError('secret archive path', { cause: new Error('secret') }), 'CORRUPT'],
+      [new SessionFormatUnsupportedError('secret archive path'), 'UNSUPPORTED_FORMAT'],
+      [new Error('secret archive path'), 'UNKNOWN'],
+    ] as const
 
     try {
-      await expect(h.controller.resolveDurableSession({ sessionId, workspacePath: WORKSPACE }))
-        .rejects.toThrow('durable source missing or corrupt')
-      expect(h.ctx.sessions.get(sessionId)).toBeUndefined()
-      await expect(h.controller.resolveDurableSession({ sessionId, workspacePath: WORKSPACE }))
-        .resolves.toMatchObject({ disposition: 'hydrated' })
-      expect(h.prepareExact).toHaveBeenCalledTimes(2)
+      for (const [failure, code] of failures) {
+        h.prepareExact.mockRejectedValueOnce(failure)
+        await expect(h.controller.resolveDurableSessionSafe({ sessionId, workspacePath: WORKSPACE }))
+          .resolves.toEqual({ ok: false, code })
+        expect(h.ctx.sessions.get(sessionId)).toBeUndefined()
+      }
+      expect(h.prepareExact).toHaveBeenCalledTimes(failures.length)
     } finally {
       await h.ctx.fiber.dispose()
+    }
+  })
+
+  it('returns a typed success and a safe workspace failure', async () => {
+    const h = await harness()
+    const sessionId = SessionId('durable-task')
+
+    try {
+      await expect(h.controller.resolveDurableSessionSafe({ sessionId, workspacePath: WORKSPACE }))
+        .resolves.toEqual({ ok: true, session: h.prepared, disposition: 'hydrated' })
+      await expect(h.controller.resolveDurableSessionSafe({ sessionId, workspacePath: '/workspace/wrong' }))
+        .resolves.toEqual({ ok: false, code: 'WORKSPACE_MISMATCH' })
+    } finally {
+      await h.ctx.fiber.dispose()
+    }
+  })
+
+  it('classifies an unavailable persistence service and registry publication failure', async () => {
+    const unavailable = await harness({ providePersistence: false })
+    const publishFailure = await harness()
+    const sessionId = SessionId('durable-task')
+    const enter = vi.spyOn(publishFailure.ctx.sessions, 'enter')
+      .mockImplementation(() => { throw new Error('registry internals') })
+
+    try {
+      await expect(unavailable.controller.resolveDurableSessionSafe({ sessionId, workspacePath: WORKSPACE }))
+        .resolves.toEqual({ ok: false, code: 'PERSISTENCE_UNAVAILABLE' })
+      await expect(publishFailure.controller.resolveDurableSessionSafe({ sessionId, workspacePath: WORKSPACE }))
+        .resolves.toEqual({ ok: false, code: 'REGISTRY_PUBLISH_FAILED' })
+      expect(publishFailure.ctx.sessions.get(sessionId)).toBeUndefined()
+      expect(publishFailure.release).toHaveBeenCalledTimes(1)
+    } finally {
+      enter.mockRestore()
+      await unavailable.ctx.fiber.dispose()
+      await publishFailure.ctx.fiber.dispose()
     }
   })
 })
