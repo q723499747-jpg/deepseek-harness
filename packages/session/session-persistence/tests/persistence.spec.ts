@@ -109,6 +109,10 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
     return this.coordinator.prepare(id, signal)
   }
 
+  override prepareExact(id: SessionId, signal?: AbortSignal): ReturnType<PersistenceCoordinator['prepareExact']> {
+    return this.coordinator.prepareExact(id, signal)
+  }
+
   load(id: SessionId): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
     return this.coordinator.load(id).then(loaded => ({ meta: loaded.meta, events: [...loaded.events] }))
   }
@@ -1034,6 +1038,61 @@ describe('PersistenceCoordinator session preparations', () => {
     } finally {
       second?.[Symbol.dispose]()
       first?.[Symbol.dispose]()
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reserves a balanced durable session without writing recovery', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    const id = SessionId('prepare-exact-balanced')
+    backend.store.set(id, { meta: meta(id), events: oneTurnLog() })
+    let coordinator!: PersistenceCoordinator<never>
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    let preparation: Awaited<ReturnType<typeof coordinator.prepareExact>> | undefined
+
+    try {
+      preparation = await coordinator.prepareExact(id)
+      expect(preparation.session.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'turn/start' }),
+        expect.objectContaining({ type: 'turn/end' }),
+      ]))
+      expect(backend.repairAttempts).toBe(0)
+      expect(backend.store.get(id)?.events).toEqual(oneTurnLog())
+    } finally {
+      preparation?.[Symbol.dispose]()
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('refuses read-only preparation when the durable log needs recovery', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    const id = SessionId('prepare-exact-recovery-required')
+    backend.store.set(id, {
+      meta: meta(id),
+      events: [{ type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }],
+    })
+    let coordinator!: PersistenceCoordinator<never>
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+
+    try {
+      await expect(coordinator.prepareExact(id)).rejects.toMatchObject({
+        name: 'SessionPersistenceRecoveryRequiredError',
+        sessionId: id,
+      })
+      expect(backend.repairAttempts).toBe(0)
+      expect(backend.store.get(id)?.events.map(event => event.type)).toEqual(['turn/start'])
+      expect(ctx.sessions.get(id)).toBeUndefined()
+    } finally {
       await fiber.dispose()
       await ctx.fiber.dispose()
     }

@@ -1329,6 +1329,17 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'Host service backing the generated `ctx.remote.session` namespace.',
     methods: [
       {
+        signature: 'markExternalTaskVisible(session: Session, marker: ExternalTaskSessionMarker): void',
+        description: 'Persist one idempotent list-visibility marker for an external task Session. This operation never appends a model turn or a user/model message.',
+        parameters: [{ name: 'session', description: 'live Session owned by the calling Host integration.' }, { name: 'marker', description: 'opaque producer/task correlation.' }],
+      },
+      {
+        signature: 'resolveDurableSession( request: DurableSessionResolveRequest, signal?: AbortSignal, ): Promise<DurableSessionResolveResult>',
+        description: 'Publish one exact durable Session into the live registry without mounting an Agent, appending an event, marking it list-visible, or calling a model. Concurrent callers for one identity share the same hydration transaction.',
+        parameters: [{ name: 'request', description: 'exact durable identity and authorized workspace.' }, { name: 'signal', description: 'optional cancellation before registry publication.' }],
+        returns: 'the live exact Session and whether this call hydrated it.',
+      },
+      {
         signature: 'resolveAgent(sessionId: SessionId): Promise<ApiSessionAgentResult>',
         description: 'Resolve or resume one ordinary Session for another Host API domain.',
         parameters: [{ name: 'sessionId', description: 'Session identity whose Agent owns the operation.' }],
@@ -1494,6 +1505,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'async prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation>',
         description: 'Prepare the exact unpublished Session used by resume. Implementations may reuse object graphs retained by an earlier inspect after confirming their durable revision is still current; disposal releases an unpublished reservation. Revision retries require the durable log to remain unchanged for one read/check round trip; continuous external writers may delay completion.',
         parameters: [{ name: 'id', description: 'persisted session to prepare.' }, { name: 'signal', description: 'optional cancellation for preparation work.' }],
+        returns: 'one owned unpublished Session preparation.',
+      },
+      {
+        signature: 'prepareExact(_id: SessionId, signal?: AbortSignal): Promise<SessionPreparation>',
+        description: 'Prepare an exact unpublished Session without repairing or otherwise changing its durable artifact. Implementations that support this seam reject logs with a torn tail or synthetic recovery events instead of committing those changes. The default fails closed so a third-party backend cannot accidentally inherit write-free semantics it does not own.',
+        parameters: [{ name: '_id', description: 'persisted session to prepare.' }, { name: 'signal', description: 'optional cancellation for preparation work.' }],
         returns: 'one owned unpublished Session preparation.',
       },
       {
@@ -3939,6 +3956,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type DshEnvironmentKey = `${typeof DSH_ENV_PREFIX}${string}`;',
   },
   {
+    name: 'DurableSessionResolveRequest',
+    declaration: 'export interface DurableSessionResolveRequest {\n    readonly sessionId: SessionId;\n    readonly workspacePath: string;\n}',
+  },
+  {
+    name: 'DurableSessionResolveResult',
+    declaration: 'export interface DurableSessionResolveResult {\n    readonly session: Session;\n    readonly disposition: \'live\' | \'hydrated\';\n}',
+  },
+  {
     name: 'DynamicCordisPackage',
     declaration: 'export interface DynamicCordisPackage {\n    pluginId: CordisDynamicPluginId;\n    packageId: CordisDynamicPackageId;\n    pluginRunId: CordisDynamicPluginRunId;\n    name: string;\n}',
   },
@@ -3965,6 +3990,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'EpochHeader',
     declaration: 'export interface EpochHeader {\n    config: LlmCallConfig;\n    adapterDefaults?: LlmCallConfigAdapterDefaults;\n    system?: string;\n    tools?: ToolSchema[];\n}',
+  },
+  {
+    name: 'ExternalTaskSessionMarker',
+    declaration: 'export interface ExternalTaskSessionMarker {\n    readonly producer: string;\n    readonly taskId: string;\n}',
   },
   {
     name: 'FileDiff',

@@ -603,6 +603,24 @@ Host service backing the generated `ctx.remote.session` namespace.
 
 ```ts cordis-catalog
 /**
+ * Persist one idempotent list-visibility marker for an external task Session.
+ * This operation never appends a model turn or a user/model message.
+ * @param session - live Session owned by the calling Host integration.
+ * @param marker - opaque producer/task correlation.
+ */
+markExternalTaskVisible(session: Session, marker: ExternalTaskSessionMarker): void
+
+/**
+ * Publish one exact durable Session into the live registry without mounting
+ * an Agent, appending an event, marking it list-visible, or calling a model.
+ * Concurrent callers for one identity share the same hydration transaction.
+ * @param request - exact durable identity and authorized workspace.
+ * @param signal - optional cancellation before registry publication.
+ * @returns the live exact Session and whether this call hydrated it.
+ */
+resolveDurableSession( request: DurableSessionResolveRequest, signal?: AbortSignal, ): Promise<DurableSessionResolveResult>
+
+/**
  * Resolve or resume one ordinary Session for another Host API domain.
  * @param sessionId - Session identity whose Agent owns the operation.
  * @returns the live Agent or the stable Session-domain failure.

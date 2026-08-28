@@ -316,6 +316,18 @@ abstract append(id: SessionId, events: readonly SessionEvent[]): Promise<void>
 async prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation>
 
 /**
+ * Prepare an exact unpublished Session without repairing or otherwise
+ * changing its durable artifact. Implementations that support this seam
+ * reject logs with a torn tail or synthetic recovery events instead of
+ * committing those changes. The default fails closed so a third-party
+ * backend cannot accidentally inherit write-free semantics it does not own.
+ * @param _id - persisted session to prepare.
+ * @param signal - optional cancellation for preparation work.
+ * @returns one owned unpublished Session preparation.
+ */
+prepareExact(_id: SessionId, signal?: AbortSignal): Promise<SessionPreparation>
+
+/**
  * Load an immutable balanced logical view and commit any required cold
  * recovery. A complete interrupted final turn is preserved and durably
  * closed with missing tool errors plus any open step and turn boundaries;

@@ -501,7 +501,7 @@ Source: [`packages/llm/llm-retry/src/types.ts:11`](../packages/llm/llm-retry/src
 'model/selection': ModelSelection
 ```
 
-Source: [`packages/api/session-controller/src/types.ts:40`](../packages/api/session-controller/src/types.ts)
+Source: [`packages/api/session-controller/src/types.ts:46`](../packages/api/session-controller/src/types.ts)
 
 ### `permission/*`
 
@@ -647,6 +647,21 @@ Source: [`packages/schedule/schedule/src/types.ts:219`](../packages/schedule/sch
 ```
 
 Source: [`packages/core/session/src/types.ts:324`](../packages/core/session/src/types.ts)
+
+<a id="sessionexternal-task--log-only"></a>
+
+#### `session/external-task` — log-only
+
+```ts persistence-catalog
+/**
+ * A durable external task owns this Session without opening a model turn.
+ * Session-list projections treat the Session as visible; transcript and
+ * model-history projections continue to ignore this log-only marker.
+ */
+'session/external-task': ExternalTaskSessionMarker
+```
+
+Source: [`packages/api/session-controller/src/types.ts:41`](../packages/api/session-controller/src/types.ts)
 
 <a id="sessiontitle--log-only"></a>
 

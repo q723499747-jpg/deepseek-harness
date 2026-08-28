@@ -18,7 +18,10 @@ import {
 import type { Session, SessionEvent, SessionId, SessionHeader } from '@deepseek-ai/dsh-session'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { BorrowedSessionSource, SessionInspection, SessionLocation } from './index.ts'
-import { SessionPersistenceNotFoundError } from './errors.ts'
+import {
+  SessionPersistenceNotFoundError,
+  SessionPersistenceRecoveryRequiredError,
+} from './errors.ts'
 import type { SessionPersistenceRevision } from './revision.ts'
 import { observeQueuedAbort, SessionPreparations } from './preparations.ts'
 import type { SessionPreparationReservation } from './preparations.ts'
@@ -770,6 +773,43 @@ export class PersistenceCoordinator<TornMarker = unknown> {
   }
 
   /**
+   * Prepare and reserve an exact unpublished Session without committing crash
+   * repair. A readable log that needs truncation or synthetic closers fails
+   * closed so callers can prove that hydration did not mutate persistence.
+   * @param id - persisted session to prepare.
+   * @param signal - optional cancellation for reading and revision checks.
+   * @returns an owned exact preparation released after publication or rollback.
+   */
+  async prepareExact(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
+    for (;;) {
+      await this.waitForRetirement(id, signal)
+      if (this.ctx.sessions.get(id) !== undefined) {
+        throw new Error(`cannot prepare session "${id}" while it is live`)
+      }
+      const reservation = await this.preparations.reserve(
+        id,
+        () => this.serialize(id, () => this.prepareCore(id)),
+        source => this.serialize(id, () => this.commitPreparedExact(source), signal),
+        signal,
+      )
+      if (reservation === undefined) continue
+      if (this.ctx.sessions.get(id) !== undefined) {
+        this.preparations.release(reservation, false)
+        throw new Error(`cannot prepare session "${id}" while it is live`)
+      }
+      return SessionPreparation.create(reservation.source.session, {
+        release: () => {
+          this.preparations.release(
+            reservation,
+            reservation.state.owner === undefined
+              && reservation.source.session.events.length === reservation.source.sessionLength,
+          )
+        },
+      })
+    }
+  }
+
+  /**
    * Commit recovery and return its immutable logical view without publication.
    * Revision retries converge once the durable log remains unchanged for one
    * read/check round trip; continuous external writers may delay completion.
@@ -1041,6 +1081,16 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       source,
       state,
     }
+  }
+
+  /** Reserve one current prepared source only when publication needs no repair. */
+  private async commitPreparedExact(
+    source: PreparedSessionSource<TornMarker>,
+  ): Promise<{ source: PreparedSessionSource<TornMarker>; state: SessionState } | undefined> {
+    if (source.tornMarker !== undefined || source.closers.length > 0) {
+      throw new SessionPersistenceRecoveryRequiredError(source.inspection.meta.id)
+    }
+    return this.commitPrepared(source)
   }
 
   /** Whether one cached source still names the current durable log revision. */

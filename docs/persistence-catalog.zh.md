@@ -503,7 +503,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'model/selection': ModelSelection
 ```
 
-来源：[`packages/api/session-controller/src/types.ts:39`](../packages/api/session-controller/src/types.ts)
+来源：[`packages/api/session-controller/src/types.ts:46`](../packages/api/session-controller/src/types.ts)
 
 ### `permission/*`
 
@@ -649,6 +649,21 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 ```
 
 来源：[`packages/core/session/src/types.ts:317`](../packages/core/session/src/types.ts)
+
+<a id="sessionexternal-task--log-only"></a>
+
+#### `session/external-task` — log-only
+
+```ts persistence-catalog
+/**
+ * A durable external task owns this Session without opening a model turn.
+ * Session-list projections treat the Session as visible; transcript and
+ * model-history projections continue to ignore this log-only marker.
+ */
+'session/external-task': ExternalTaskSessionMarker
+```
+
+来源：[`packages/api/session-controller/src/types.ts:41`](../packages/api/session-controller/src/types.ts)
 
 <a id="sessiontitle--log-only"></a>
 

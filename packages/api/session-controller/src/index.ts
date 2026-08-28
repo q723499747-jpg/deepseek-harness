@@ -1,5 +1,6 @@
 /** Session Remote owner: cold reads, explicit Agent commands, and live control state. */
 
+import { isAbsolute, normalize } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { errorChain } from '@deepseek-ai/dsh-llm'
@@ -80,6 +81,39 @@ export interface SessionControllerInternals {
   readonly canOpenPath?: () => boolean
 }
 
+/** Same-process request for publishing one exact durable Session into the live registry. */
+export interface DurableSessionResolveRequest {
+  /** Durable Session identity. */
+  readonly sessionId: SessionId
+  /** Exact absolute workspace path authorized by the caller. */
+  readonly workspacePath: string
+}
+
+/** Successful durable Session resolution without an Agent or model turn. */
+export interface DurableSessionResolveResult {
+  /** Existing or newly hydrated exact Session. */
+  readonly session: Session
+  /** Whether this call observed a live Session or published the cold source. */
+  readonly disposition: 'live' | 'hydrated'
+}
+
+/** Stable fail-closed reason from the same-process durable Session seam. */
+export class DurableSessionResolveError extends Error {
+  /**
+   * @param code - stable failure class for Host integrations.
+   * @param message - diagnostic without persistence contents.
+   * @param options - underlying persistence or validation failure.
+   */
+  constructor(
+    readonly code: 'persistence-unavailable' | 'workspace-mismatch' | 'session-mismatch',
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+    this.name = 'DurableSessionResolveError'
+  }
+}
+
 /** Host service backing the generated `ctx.remote.session` namespace. */
 export class SessionController extends TypertRemoteService {
   static inject = [
@@ -107,6 +141,7 @@ export class SessionController extends TypertRemoteService {
   private readonly openPath: (path: string, signal: AbortSignal) => Promise<void>
   private readonly canOpenPath: () => boolean
   private readonly promotions = new Set<Promise<void>>()
+  private readonly hydrations = new Map<SessionId, Promise<DurableSessionResolveResult>>()
 
   /**
    * @param ctx - Host context containing the Session capability assembly.
@@ -171,6 +206,102 @@ export class SessionController extends TypertRemoteService {
     const exists = session.events.some(event => event.type === 'session/external-task'
       && event.data.producer === marker.producer && event.data.taskId === marker.taskId)
     if (!exists) session.append('session/external-task', marker)
+  }
+
+  /**
+   * Publish one exact durable Session into the live registry without mounting
+   * an Agent, appending an event, marking it list-visible, or calling a model.
+   * Concurrent callers for one identity share the same hydration transaction.
+   * @param request - exact durable identity and authorized workspace.
+   * @param signal - optional cancellation before registry publication.
+   * @returns the live exact Session and whether this call hydrated it.
+   */
+  resolveDurableSession(
+    request: DurableSessionResolveRequest,
+    signal?: AbortSignal,
+  ): Promise<DurableSessionResolveResult> {
+    const workspacePath = this.validateWorkspacePath(request.sessionId, request.workspacePath)
+    const live = this.ctx.sessions.get(request.sessionId)
+    if (live !== undefined) {
+      this.assertWorkspace(request.sessionId, live.header, workspacePath)
+      return Promise.resolve({ session: live, disposition: 'live' })
+    }
+    const inFlight = this.hydrations.get(request.sessionId)
+    if (inFlight !== undefined) {
+      return inFlight.then((result) => {
+        this.assertWorkspace(request.sessionId, result.session.header, workspacePath)
+        return result
+      })
+    }
+    const hydration = this.hydrateDurableSession(request.sessionId, workspacePath, signal)
+    this.hydrations.set(request.sessionId, hydration)
+    void hydration.finally(() => {
+      if (this.hydrations.get(request.sessionId) === hydration) {
+        this.hydrations.delete(request.sessionId)
+      }
+    }).catch(() => {})
+    return hydration
+  }
+
+  /** Prepare, validate, and publish one cold Session without durable mutation. */
+  private async hydrateDurableSession(
+    sessionId: SessionId,
+    workspacePath: string,
+    signal?: AbortSignal,
+  ): Promise<DurableSessionResolveResult> {
+    const persistence = this.ctx.get('sessionPersistence')
+    if (persistence === undefined) {
+      throw new DurableSessionResolveError(
+        'persistence-unavailable',
+        `cannot hydrate session "${sessionId}": session persistence is not configured`,
+      )
+    }
+    signal?.throwIfAborted()
+    using preparation = await persistence.prepareExact(sessionId, signal)
+    signal?.throwIfAborted()
+    const prepared = preparation.session
+    if (prepared.id !== sessionId || prepared.header.id !== sessionId) {
+      throw new DurableSessionResolveError(
+        'session-mismatch',
+        `cannot hydrate session "${sessionId}": persistence returned a different identity`,
+      )
+    }
+    this.assertWorkspace(sessionId, prepared.header, workspacePath)
+    const raced = this.ctx.sessions.get(sessionId)
+    if (raced !== undefined) {
+      this.assertWorkspace(sessionId, raced.header, workspacePath)
+      return { session: raced, disposition: 'live' }
+    }
+    this.ctx.effect(function* (this: SessionController) {
+      yield this.ctx.sessions.enter(prepared)
+      this.ctx.sessions.announce(prepared)
+    }.bind(this), `session-controller hydrate ${sessionId}`)
+    return { session: prepared, disposition: 'hydrated' }
+  }
+
+  /** Normalize and validate one caller-supplied absolute workspace path. */
+  private validateWorkspacePath(sessionId: SessionId, workspacePath: string): string {
+    if (workspacePath.length === 0 || !isAbsolute(workspacePath)) {
+      throw new DurableSessionResolveError(
+        'workspace-mismatch',
+        `cannot hydrate session "${sessionId}": workspace path must be absolute`,
+      )
+    }
+    return normalize(workspacePath)
+  }
+
+  /** Require the durable Session header to remain in the caller's workspace. */
+  private assertWorkspace(
+    sessionId: SessionId,
+    header: SessionHeader,
+    workspacePath: string,
+  ): void {
+    if (header.cwd === undefined || normalize(header.cwd) !== workspacePath) {
+      throw new DurableSessionResolveError(
+        'workspace-mismatch',
+        `cannot hydrate session "${sessionId}": durable workspace does not match the requested workspace`,
+      )
+    }
   }
 
   private promote(observation: SessionObservation): void {

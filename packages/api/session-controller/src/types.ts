@@ -37,7 +37,6 @@ declare module '@deepseek-ai/dsh-session/types' {
      * A durable external task owns this Session without opening a model turn.
      * Session-list projections treat the Session as visible; transcript and
      * model-history projections continue to ignore this log-only marker.
-     * @mode emit
      */
     'session/external-task': ExternalTaskSessionMarker
     /**
