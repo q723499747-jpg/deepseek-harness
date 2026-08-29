@@ -1,6 +1,6 @@
 /** Node-half composition diagnostics for package metadata and built client bundles. */
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { SourceMap } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -357,7 +357,7 @@ describe('client bundle activation', () => {
     expect(service.clientPath(packageName)).toBe(clientPath)
   })
 
-  it('rejects one package name resolving to distinct browser bundles', () => {
+  it('coalesces exact installed copies and rejects browser artifact drift', () => {
     const packageName = '@fixture/distinct-client-bundles'
     const firstClientPath = writePackage(packageName)
     const firstHostPath = join(dirname(firstClientPath), 'index.js')
@@ -365,20 +365,11 @@ describe('client bundle activation', () => {
     writeFileSync(firstHostPath, 'export default {}\n')
     writeFileSync(firstClientPath, 'module.exports = {}\n')
 
+    const firstPackageRoot = dirname(dirname(firstClientPath))
     const alternateRoot = join(root!, 'alternate', 'node_modules', ...packageName.split('/'))
     const secondClientPath = join(alternateRoot, 'lib', 'client.js')
     const secondHostPath = join(alternateRoot, 'lib', 'index.js')
-    mkdirSync(dirname(secondClientPath), { recursive: true })
-    writeFileSync(join(alternateRoot, 'package.json'), JSON.stringify({
-      name: packageName,
-      exports: {
-        './client': './lib/client.js',
-        './package.json': './package.json',
-      },
-      dsh: { client: { platform: 'web' } },
-    }))
-    writeFileSync(secondHostPath, 'export default {}\n')
-    writeFileSync(secondClientPath, 'module.exports = {}\n')
+    cpSync(firstPackageRoot, alternateRoot, { recursive: true })
 
     const firstAlias = './first-host.js'
     const secondAlias = './second-host.js'
@@ -392,6 +383,11 @@ describe('client bundle activation', () => {
       }),
     }
 
+    expect(constructWithRoute([firstAlias, secondAlias], {
+      internal: internal as unknown as NonNullable<Context['loader']['internal']>,
+    }).service.graph().entries.map(entry => entry.id)).toEqual([packageName])
+
+    writeFileSync(secondClientPath, 'module.exports = { drifted: true }\n')
     expect(() => constructWithRoute([firstAlias, secondAlias], {
       internal: internal as unknown as NonNullable<Context['loader']['internal']>,
     })).toThrow(
