@@ -337,7 +337,7 @@ describe('client bundle activation', () => {
     },
   )
 
-  it('rejects distinct active Loader sources for one browser package', () => {
+  it('coalesces multiple host rows that own one exact browser bundle', () => {
     const packageName = '@fixture/duplicate-source'
     const clientPath = writePackage(packageName)
     const hostPath = join(dirname(clientPath), 'index.js')
@@ -350,10 +350,52 @@ describe('client bundle activation', () => {
       resolveSync: () => ({ format: 'module' as const, url: pathToFileURL(hostPath).href }),
     }
 
-    expect(() => constructWithRoute([packageName, alias], {
+    const { service } = constructWithRoute([packageName, alias], {
+      internal: internal as unknown as NonNullable<Context['loader']['internal']>,
+    })
+    expect(service.graph().entries.map(entry => entry.id)).toEqual([packageName])
+    expect(service.clientPath(packageName)).toBe(clientPath)
+  })
+
+  it('rejects one package name resolving to distinct browser bundles', () => {
+    const packageName = '@fixture/distinct-client-bundles'
+    const firstClientPath = writePackage(packageName)
+    const firstHostPath = join(dirname(firstClientPath), 'index.js')
+    mkdirSync(dirname(firstHostPath), { recursive: true })
+    writeFileSync(firstHostPath, 'export default {}\n')
+    writeFileSync(firstClientPath, 'module.exports = {}\n')
+
+    const alternateRoot = join(root!, 'alternate', 'node_modules', ...packageName.split('/'))
+    const secondClientPath = join(alternateRoot, 'lib', 'client.js')
+    const secondHostPath = join(alternateRoot, 'lib', 'index.js')
+    mkdirSync(dirname(secondClientPath), { recursive: true })
+    writeFileSync(join(alternateRoot, 'package.json'), JSON.stringify({
+      name: packageName,
+      exports: {
+        './client': './lib/client.js',
+        './package.json': './package.json',
+      },
+      dsh: { client: { platform: 'web' } },
+    }))
+    writeFileSync(secondHostPath, 'export default {}\n')
+    writeFileSync(secondClientPath, 'module.exports = {}\n')
+
+    const firstAlias = './first-host.js'
+    const secondAlias = './second-host.js'
+    const internal = {
+      version: 'v2' as const,
+      resolveSync: (_parentURL: unknown, request: unknown) => ({
+        format: 'module' as const,
+        url: pathToFileURL(Reflect.get(request as object, 'specifier') === firstAlias
+          ? firstHostPath
+          : secondHostPath).href,
+      }),
+    }
+
+    expect(() => constructWithRoute([firstAlias, secondAlias], {
       internal: internal as unknown as NonNullable<Context['loader']['internal']>,
     })).toThrow(
-      `client-modules: package ${packageName} resolves from multiple active Loader sources:`,
+      `client-modules: package ${packageName} resolves to multiple active client bundles:`,
     )
   })
 
@@ -379,9 +421,7 @@ describe('client bundle activation', () => {
     entries.push(alias)
     emitLoaderEntryChange(context, alias)
     await Promise.resolve()
-    expect(warning).toHaveBeenCalledWith(expect.objectContaining({
-      message: expect.stringContaining(`package ${packageName} resolves from multiple active Loader sources`) as string,
-    }))
+    expect(warning).not.toHaveBeenCalled()
     expect(service.graph().entries[0]!.rev).toBe(firstRevision)
 
     entries.splice(entries.indexOf(packageName), 1)
