@@ -946,7 +946,7 @@ export class ClientModuleRegistry extends Service {
     for (const source of this.sources.values()) {
       if (source.packageName === packageName) sources.push(source)
     }
-    if (new Set(sources.map(source => source.meta.clientPath)).size > 1) {
+    if (new Set(sources.map(source => this.clientFaceIdentity(packageName, source.meta))).size > 1) {
       const locations = sources
         .map(source => `${JSON.stringify(source.loaderName)} from ${source.baseUrl} -> ${source.meta.clientPath}`)
         .join(', ')
@@ -976,6 +976,17 @@ export class ClientModuleRegistry extends Service {
       ...(snapshot.sourceMap === undefined ? {} : { sourceMap: snapshot.sourceMap }),
     })
     return true
+  }
+
+  /** Exact identity of one copied browser face, independent of its install path. */
+  private clientFaceIdentity(packageName: string, meta: PkgMeta): string {
+    const snapshot = this.initialBundleSnapshot(packageName, meta.clientPath)
+    return JSON.stringify({
+      artifact: artifactRevision(snapshot.bundle, snapshot.sourceMap),
+      inject: meta.inject ?? [],
+      external: meta.external,
+      immediately: meta.immediately,
+    })
   }
 
   private flush(onError: (err: Error) => void): void {
