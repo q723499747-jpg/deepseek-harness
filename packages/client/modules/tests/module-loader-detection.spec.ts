@@ -29,6 +29,18 @@ describe('detectModuleLoaderVersion', () => {
     expect(resolveSync).toHaveBeenCalledTimes(2)
   })
 
+  it('accepts Node 24 builtin results that omit format', () => {
+    const resolveSync = vi.fn((specifier: unknown, parentURL: unknown) => {
+      if (specifier !== 'node:path' || typeof parentURL !== 'string') {
+        throw new TypeError('expected v1 arguments')
+      }
+      return { url: 'node:path' }
+    })
+
+    expect(detectModuleLoaderVersion({ resolveSync })).toBe('v1')
+    expect(resolveSync).toHaveBeenCalledTimes(2)
+  })
+
   it('returns undefined when neither internal convention is usable', () => {
     const resolveSync = vi.fn(() => { throw new Error('unsupported') })
 
