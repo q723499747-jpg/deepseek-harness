@@ -106,11 +106,10 @@ export interface UnversionedModuleLoader {
   resolveSync: (...args: any[]) => unknown
 }
 
-/** Return whether an internal resolver result has the stable public fields we consume. */
-function isResolveResult(value: unknown): value is ResolveResult {
+/** Return whether an internal resolver result exposes the stable field used by the probe. */
+function hasResolvedUrl(value: unknown): value is Pick<ResolveResult, 'url'> {
   return typeof value === 'object' && value !== null
     && typeof Reflect.get(value, 'url') === 'string'
-    && typeof Reflect.get(value, 'format') === 'string'
 }
 
 /**
@@ -125,11 +124,11 @@ export function detectModuleLoaderVersion(loader: UnversionedModuleLoader): 'v1'
   const specifier = 'node:path'
   try {
     const resolved = loader.resolveSync(parentURL, { specifier, attributes: {} })
-    if (isResolveResult(resolved) && resolved.url === specifier) return 'v2'
+    if (hasResolvedUrl(resolved) && resolved.url === specifier) return 'v2'
   } catch {}
   try {
     const resolved = loader.resolveSync(specifier, parentURL, {})
-    if (isResolveResult(resolved) && resolved.url === specifier) return 'v1'
+    if (hasResolvedUrl(resolved) && resolved.url === specifier) return 'v1'
   } catch {}
   return undefined
 }
