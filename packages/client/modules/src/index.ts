@@ -17,8 +17,10 @@
  * steady state share one implementation. Package metadata (including the
  * negative "not a client package" verdict) is cached per Loader specifier and
  * owning-tree base URL until restart. The manifest package name identifies
- * the browser module; distinct active Loader sources for that package are a
- * composition error. Bundle content changes reach the graph only through
+ * the browser module. Multiple host rows from one package are coalesced when
+ * they resolve to the same exact client artifact; rows that resolve one package
+ * name to distinct client artifacts remain a composition error. Bundle content
+ * changes reach the graph only through
  * {@link ClientModuleRegistry.rebuilt}.
  * @module @deepseek-ai/dsh-client-modules
  */
@@ -944,15 +946,20 @@ export class ClientModuleRegistry extends Service {
     for (const source of this.sources.values()) {
       if (source.packageName === packageName) sources.push(source)
     }
-    if (sources.length > 1) {
+    if (new Set(sources.map(source => source.meta.clientPath)).size > 1) {
       const locations = sources
-        .map(source => `${JSON.stringify(source.loaderName)} from ${source.baseUrl}`)
+        .map(source => `${JSON.stringify(source.loaderName)} from ${source.baseUrl} -> ${source.meta.clientPath}`)
         .join(', ')
       throw new Error(
-        `client-modules: package ${packageName} resolves from multiple active Loader sources: ${locations}; remove one entry`,
+        `client-modules: package ${packageName} resolves to multiple active client bundles: ${locations}; remove one entry`,
       )
     }
-    const source = sources[0]
+    // A dual-face package may expose several independently configurable host
+    // rows while owning one browser face. Keep the already-selected row stable;
+    // every accepted row points at the same exact client artifact.
+    const currentSourceKey = this.table.get(packageName)?.sourceKey
+    const source = sources.find(candidate => candidate.sourceKey === currentSourceKey)
+      ?? sources.sort((left, right) => left.sourceKey.localeCompare(right.sourceKey))[0]
     if (source === undefined) return this.table.delete(packageName)
     if (this.table.get(packageName)?.sourceKey === source.sourceKey) return false
     // The opaque initial rev rides the row until HMR observes a file change;
