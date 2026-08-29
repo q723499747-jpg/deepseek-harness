@@ -8,8 +8,8 @@
 import { Context } from '@deepseek-ai/cordis'
 import {
   adoptSessionEvent,
+  ExternalSessionEventEnvelopeUnsupportedError,
   interruptedTurnClosers,
-  KNOWN_SESSION_EVENT_TYPES,
   SESSION_FORMAT_VERSION,
   SessionPreparation,
   snapshotJsonValue,
@@ -18,7 +18,10 @@ import {
 import type { Session, SessionEvent, SessionId, SessionHeader } from '@deepseek-ai/dsh-session'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { BorrowedSessionSource, SessionInspection, SessionLocation } from './index.ts'
-import { SessionPersistenceNotFoundError } from './errors.ts'
+import {
+  SessionPersistenceNotFoundError,
+  SessionPersistenceRecoveryRequiredError,
+} from './errors.ts'
 import type { SessionPersistenceRevision } from './revision.ts'
 import { observeQueuedAbort, SessionPreparations } from './preparations.ts'
 import type { SessionPreparationReservation } from './preparations.ts'
@@ -545,11 +548,15 @@ function eventMessageId(event: SessionEvent): PersistedMessageId | undefined {
 }
 
 /** Materialize stored events as upgraded, validated snapshots with immutable messages. */
-function snapshotStoredEvents(events: readonly SessionEvent[], id: SessionId): SessionEvent[] {
+function snapshotStoredEvents(
+  events: readonly SessionEvent[],
+  id: SessionId,
+  normalizeEnvelope: (event: SessionEvent) => SessionEvent,
+): SessionEvent[] {
   assertSupportedEvents(events, id)
   const messageIds = new Map<number, PersistedMessageId>()
   return events.map((event) => {
-    const migratedStart = migrateLegacyTurnStartEvent(event, id)
+    const migratedStart = migrateLegacyTurnStartEvent(normalizeEnvelope(event), id)
     const migratedTurn = migrateLegacyTurnEndEvent(migratedStart, id)
     const migratedSteering = migrateLegacySteeringEvent(migratedTurn, id)
     const snapshot = snapshotSessionEvent(migrateLegacyMessageEvent(migratedSteering, id, messageIds))
@@ -560,11 +567,15 @@ function snapshotStoredEvents(events: readonly SessionEvent[], id: SessionId): S
 }
 
 /** Upgrade and validate an exclusively owned backend result without copying it. */
-function adoptStoredEvents(events: SessionEvent[], id: SessionId): SessionEvent[] {
+function adoptStoredEvents(
+  events: SessionEvent[],
+  id: SessionId,
+  normalizeEnvelope: (event: SessionEvent) => SessionEvent,
+): SessionEvent[] {
   assertSupportedEvents(events, id)
   const messageIds = new Map<number, PersistedMessageId>()
   for (const [index, event] of events.entries()) {
-    const migratedStart = migrateLegacyTurnStartEvent(event, id)
+    const migratedStart = migrateLegacyTurnStartEvent(normalizeEnvelope(event), id)
     const migratedTurn = migrateLegacyTurnEndEvent(migratedStart, id)
     const migratedSteering = migrateLegacySteeringEvent(migratedTurn, id)
     const adopted = adoptSessionEvent(migrateLegacyMessageEvent(migratedSteering, id, messageIds))
@@ -597,6 +608,10 @@ export class PersistenceCoordinator<TornMarker = unknown> {
   private retirements = new Map<SessionId, Promise<void>>()
   /** Shared cold reads, unpublished reservations, and completed LRU entries. */
   private readonly preparations: SessionPreparations<PreparedSessionSource<TornMarker>, SessionState>
+  /** Exact read-only reservations whose constructor suffix must wait for a real owner append. */
+  private readonly exactPreparations = new WeakSet<
+    SessionPreparationReservation<PreparedSessionSource<TornMarker>, SessionState>
+  >()
   /**
    * Per-session serialization: every operation chains onto the prior one for the
    * same id, so writes for one session never interleave. Keyed by session id.
@@ -759,6 +774,45 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       }
       return SessionPreparation.create(reservation.source.session, {
         release: () => {
+          this.preparations.release(
+            reservation,
+            reservation.state.owner === undefined
+              && reservation.source.session.events.length === reservation.source.sessionLength,
+          )
+        },
+      })
+    }
+  }
+
+  /**
+   * Prepare and reserve an exact unpublished Session without committing crash
+   * repair. A readable log that needs truncation or synthetic closers fails
+   * closed so callers can prove that hydration did not mutate persistence.
+   * @param id - persisted session to prepare.
+   * @param signal - optional cancellation for reading and revision checks.
+   * @returns an owned exact preparation released after publication or rollback.
+   */
+  async prepareExact(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
+    for (;;) {
+      await this.waitForRetirement(id, signal)
+      if (this.ctx.sessions.get(id) !== undefined) {
+        throw new Error(`cannot prepare session "${id}" while it is live`)
+      }
+      const reservation = await this.preparations.reserve(
+        id,
+        () => this.serialize(id, () => this.prepareCore(id)),
+        source => this.serialize(id, () => this.commitPreparedExact(source), signal),
+        signal,
+      )
+      if (reservation === undefined) continue
+      if (this.ctx.sessions.get(id) !== undefined) {
+        this.preparations.release(reservation, false)
+        throw new Error(`cannot prepare session "${id}" while it is live`)
+      }
+      this.exactPreparations.add(reservation)
+      return SessionPreparation.create(reservation.source.session, {
+        release: () => {
+          this.exactPreparations.delete(reservation)
           this.preparations.release(
             reservation,
             reservation.state.owner === undefined
@@ -941,7 +995,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
         const whole = await this.readStoredPrefix(id, signal)
         return { meta: whole.meta, events: whole.events.filter(event => event.seq >= fromSeq) }
       }
-      const events = snapshotStoredEvents(suffix.events, id)
+      const events = snapshotStoredEvents(
+        suffix.events,
+        id,
+        event => this.normalizeStoredEventEnvelope(suffix.meta, event),
+      )
       this.assertEventsSupported(suffix.meta, events)
       return { meta: structuredClone(suffix.meta), events }
     }
@@ -961,7 +1019,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     if (stored === undefined) throw new SessionPersistenceNotFoundError(id)
     this.assertStoredId(id, stored.meta)
     this.assertVersion(stored.meta)
-    const events = snapshotStoredEvents(stored.events, id)
+    const events = snapshotStoredEvents(
+      stored.events,
+      id,
+      event => this.normalizeStoredEventEnvelope(stored.meta, event),
+    )
     this.assertEventsSupported(stored.meta, events)
     return {
       meta: structuredClone(stored.meta),
@@ -977,7 +1039,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       const { meta, events, revision, tornMarker } = stored
       this.assertStoredId(id, meta)
       this.assertVersion(meta)
-      const storedEvents = adoptStoredEvents(events, id)
+      const storedEvents = adoptStoredEvents(
+        events,
+        id,
+        event => this.normalizeStoredEventEnvelope(meta, event),
+      )
       this.assertEventsSupported(meta, storedEvents)
 
       // Preserve complete interrupted events and synthesize only missing closers.
@@ -1041,6 +1107,16 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       source,
       state,
     }
+  }
+
+  /** Reserve one current prepared source only when publication needs no repair. */
+  private async commitPreparedExact(
+    source: PreparedSessionSource<TornMarker>,
+  ): Promise<{ source: PreparedSessionSource<TornMarker>; state: SessionState } | undefined> {
+    if (source.tornMarker !== undefined || source.closers.length > 0) {
+      throw new SessionPersistenceRecoveryRequiredError(source.inspection.meta.id)
+    }
+    return this.commitPrepared(source)
   }
 
   /** Whether one cached source still names the current durable log revision. */
@@ -1129,6 +1205,19 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     throw this.unsupported(meta, sessionFormatVersionRefusal(meta.id, meta.version))
   }
 
+  /** Convert only owner-declared legacy external envelopes to the current in-memory shape. */
+  private normalizeStoredEventEnvelope(meta: SessionHeader, event: SessionEvent): SessionEvent {
+    try {
+      return this.ctx.sessions.normalizeRestoredEventEnvelope(event)
+    } catch (error) {
+      if (!(error instanceof ExternalSessionEventEnvelopeUnsupportedError)) throw error
+      throw this.unsupported(
+        meta,
+        `session "${meta.id}" contains an unsupported envelope extension on event type "${error.eventType}" (seq ${event.seq}); refusing to interpret the log`,
+      )
+    }
+  }
+
   /**
    * Refuse a log containing an event type this build does not know: silently
    * skipping an unknown event could reconstruct a wrong session. Runs on
@@ -1138,7 +1227,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
    */
   private assertEventsSupported(meta: SessionHeader, events: readonly SessionEvent[]): void {
     for (const event of events) {
-      if (KNOWN_SESSION_EVENT_TYPES.has(event.type)) continue
+      if (this.ctx.sessions.supportsEventType(event.type)) continue
       throw this.unsupported(meta, `session "${meta.id}" contains event type "${event.type}" (seq ${event.seq}) unknown to this harness; refusing to interpret the log — it was likely written by a newer harness`)
     }
   }
@@ -1259,7 +1348,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     return live
   }
 
-  /** Bind one exact prepared Session and persist only its unpublished suffix. */
+  /** Bind one prepared Session, deferring exact-read suffixes until the first owner append. */
   private attachPrepared(
     session: Session,
     reservation: SessionPreparationReservation<PreparedSessionSource<TornMarker>, SessionState>,
@@ -1271,13 +1360,14 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       throw new Error(`session "${session.id}" preparation no longer matches its persistence state`)
     }
     const suffix = session.events.slice(state.cursor).map(event => structuredClone(event))
+    const deferSuffix = this.exactPreparations.delete(reservation)
     this.preparations.attach(reservation)
     state.owner = session
     const live: LiveSessionState = {
       init: Promise.resolve(),
-      writes: this.createWriteBehind(session, () => live.init),
+      writes: this.createWriteBehind(session, () => live.init, deferSuffix ? suffix : []),
     }
-    if (suffix.length > 0) {
+    if (!deferSuffix && suffix.length > 0) {
       live.init = this.serialize(session.id, () => this.appendCore(session.id, suffix))
       live.init.catch(() => { /* observed by flush/dispose through the controller */ })
     }
@@ -1295,7 +1385,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     /* v8 ignore next -- a cursor > 0 means the session was materialized, so it exists */
     if (stored === undefined) return false
     this.assertStoredId(id, stored.meta)
-    return seedCoversPrefix(seed, snapshotStoredEvents(stored.events, id).slice(0, cursor))
+    return seedCoversPrefix(seed, snapshotStoredEvents(
+      stored.events,
+      id,
+      event => this.normalizeStoredEventEnvelope(stored.meta, event),
+    ).slice(0, cursor))
   }
 
   /**
@@ -1383,7 +1477,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       throw new Error(`session "${session.header.id}" is already persisted at a different cwd (persisted: ${String(meta.cwd)}, live: ${String(session.header.cwd)}) (id collision)`)
     }
     this.assertVersion(meta)
-    const storedEvents = snapshotStoredEvents(events, session.header.id)
+    const storedEvents = snapshotStoredEvents(
+      events,
+      session.header.id,
+      event => this.normalizeStoredEventEnvelope(meta, event),
+    )
     this.assertEventsSupported(meta, storedEvents)
     if (!seedCoversPrefix(seed, storedEvents)) {
       throw new Error(`session "${session.header.id}" already has a persisted log on disk that does not match this live session (id collision)`)
@@ -1414,13 +1512,25 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     await live.writes.flush()
   }
 
-  /** Build one package-private write controller around initialization and id serialization. */
-  private createWriteBehind(session: Session, ready: () => Promise<void>): SessionWriteBehind {
+  /**
+   * Build one package-private write controller around initialization and id serialization.
+   * An exact hydrate may own constructor-only markers in memory. Those markers remain
+   * read-only until a later owner event supplies the first durable write; an empty flush
+   * or registry rollback therefore cannot touch the source archive.
+   */
+  private createWriteBehind(
+    session: Session,
+    ready: () => Promise<void>,
+    deferredPrefix: readonly SessionEvent[] = [],
+  ): SessionWriteBehind {
+    let prefix = deferredPrefix.map(event => structuredClone(event))
     return new SessionWriteBehind({
       maxDelayMs: this.writeBatchMaxDelayMs,
       write: async (batch) => {
         await ready()
-        await this.serialize(session.header.id, () => this.appendLiveBatch(session.header.id, batch))
+        const combined = prefix.length === 0 ? batch : [...prefix, ...batch]
+        await this.serialize(session.header.id, () => this.appendLiveBatch(session.header.id, combined))
+        prefix = []
       },
       reportBackgroundFailure: (error) => {
         this.ctx.logger.warn(`${this.backend.name}: background write for session "${session.id}" failed (buffered events retained): ${String(error)}`)

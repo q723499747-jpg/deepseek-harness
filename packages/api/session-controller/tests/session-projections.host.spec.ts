@@ -322,6 +322,24 @@ describe('session.history projections block', () => {
 })
 
 describe('session.list projections column', () => {
+  it('lists a durable external task session without fabricating a model turn or user message', async () => {
+    const { ctx, session } = await harness(true)
+    const gateway = remote(ctx)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(ctx.sessionProjections.snapshot(session).values.sessionListMetadata).toEqual({ blank: true, lastPromptAt: null })
+
+    ctx.sessionController.markExternalTaskVisible(session, { producer: 'test-external-task', taskId: 'opaque-1' })
+    ctx.sessionController.markExternalTaskVisible(session, { producer: 'test-external-task', taskId: 'opaque-1' })
+
+    expect(session.events.map(event => event.type)).toEqual(['session/external-task'])
+    expect(session.events.some(event => event.type === 'turn/start' || event.type === 'user/message')).toBe(false)
+    const response = await gateway.list(request({}))
+    if (!response.ok) throw new Error('unreachable')
+    const row = response.value.items.find(item => item.sessionId === session.id)
+    expect(row?.blank).toBe(false)
+    expect(row?.projections?.values.sessionListMetadata).toEqual({ blank: false, lastPromptAt: null })
+  })
+
   it('serves every already-materialized wire value from the live registry without folding', async () => {
     const { ctx, session } = await harness(true)
     ctx.sessionProjections.register(lastUserUnit())

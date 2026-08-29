@@ -91,7 +91,7 @@ interface SessionHeader {
 
 ## Format refusal — logs a build cannot faithfully read
 
-A backend refuses a log it cannot faithfully interpret with `SessionFormatUnsupportedError`, distinct from `SessionPersistenceCorruptionError` because nothing is damaged. A header `version` ahead of `SESSION_FORMAT_VERSION` names the direction ("written by a newer harness — upgrade the harness to open it"); one behind it states that this build ships no upgrade path. After legacy-shape normalization, an event type outside this build's generated set (`KNOWN_SESSION_EVENT_TYPES`, emitted by `gen-persistence-catalog`) also refuses reconstruction because silently skipping it could change how the rest of the log must be read. The message appends the raw log path when the backend keeps one artifact per session, so the refused text stays reachable. The JSONL backend refuses a foreign version straight from the raw header line, before validating this format version's header fields or decoding any event row — a structurally different future format still reports the upgrade direction, never "corrupt"; SQLite gates whole-file structure through its own `SCHEMA_VERSION` pragma first. Design rationale and the deferred upgrader chain live in the [fail-closed event-vocabulary note](../../.agents/notes/implemented/simplification/2026-08-25-fail-closed-session-event-vocabulary.md).
+A backend refuses a log it cannot faithfully interpret with `SessionFormatUnsupportedError`, distinct from `SessionPersistenceCorruptionError` because nothing is damaged. A header `version` ahead of `SESSION_FORMAT_VERSION` names the direction ("written by a newer harness — upgrade the harness to open it"); one behind it states that this build ships no upgrade path. After legacy-shape normalization, an event type outside both the generated built-in set (`KNOWN_SESSION_EVENT_TYPES`, emitted by `gen-persistence-catalog`) and every active owner plugin's `SessionStore.registerEventTypes()` registration refuses reconstruction because silently skipping it could change how the rest of the log must be read. A log-only owner may declare exact historical `ignorable:true` for its own vocabulary; restore removes only that key from its detached in-memory event and never rewrites storage. False or non-boolean values, built-in or unregistered events, and any other extension key remain unsupported. Registrations are effect-owned and reference-counted; unloading every owner makes its types unsupported again. The message appends the raw log path when the backend keeps one artifact per session, so the refused text stays reachable. The JSONL backend refuses a foreign version straight from the raw header line, before validating this format version's header fields or decoding any event row — a structurally different future format still reports the upgrade direction, never "corrupt"; SQLite gates whole-file structure through its own `SCHEMA_VERSION` pragma first. Design rationale and the deferred upgrader chain live in the [fail-closed event-vocabulary note](../../.agents/notes/implemented/simplification/2026-08-25-fail-closed-session-event-vocabulary.md).
 
 ## `CreateSessionOptions` — seeding and metadata
 
@@ -314,6 +314,18 @@ abstract append(id: SessionId, events: readonly SessionEvent[]): Promise<void>
  * @returns one owned unpublished Session preparation.
  */
 async prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation>
+
+/**
+ * Prepare an exact unpublished Session without repairing or otherwise
+ * changing its durable artifact. Implementations that support this seam
+ * reject logs with a torn tail or synthetic recovery events instead of
+ * committing those changes. The default fails closed so a third-party
+ * backend cannot accidentally inherit write-free semantics it does not own.
+ * @param _id - persisted session to prepare.
+ * @param signal - optional cancellation for preparation work.
+ * @returns one owned unpublished Session preparation.
+ */
+prepareExact(_id: SessionId, signal?: AbortSignal): Promise<SessionPreparation>
 
 /**
  * Load an immutable balanced logical view and commit any required cold

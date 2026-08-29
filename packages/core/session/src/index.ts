@@ -19,6 +19,7 @@ import { snapshotJsonValue } from './json.ts'
 import { deriveEventMessage, SurfaceManager } from './surface.ts'
 import type { SessionSurface } from './surface.ts'
 import { foldRequestHeader } from './request-header.ts'
+import { KNOWN_SESSION_EVENT_TYPES } from './known-event-types.ts'
 
 export * from './types.ts'
 export { SessionPreparation } from './preparation.ts'
@@ -781,6 +782,40 @@ export class SessionForkError extends Error {
   }
 }
 
+/** Exact runtime ownership for one external durable event namespace. */
+export interface ExternalSessionEventTypeRegistration {
+  /** Stable plugin/package owner identity. */
+  readonly owner: string
+  /** Exact namespace prefix ending in `/`. */
+  readonly prefix: string
+  /** Complete event vocabulary owned under the prefix. */
+  readonly types: readonly string[]
+  /** Exact obsolete envelope shape this log-only owner can read without rewriting storage. */
+  readonly legacyEnvelope?: {
+    /** Accept only an exact historical `ignorable: true` marker during in-memory restore. */
+    readonly ignorable: true
+  }
+}
+
+interface ActiveExternalEventTypeOwner {
+  readonly signature: string
+  readonly types: readonly string[]
+  readonly legacyIgnorable: boolean
+  count: number
+}
+
+/** A stored event carries an envelope extension not declared by its active owner. */
+export class ExternalSessionEventEnvelopeUnsupportedError extends Error {
+  constructor(readonly eventType: string) {
+    super(`session event type "${eventType}" carries an unsupported envelope extension`)
+    this.name = 'ExternalSessionEventEnvelopeUnsupportedError'
+  }
+}
+
+const CURRENT_SESSION_EVENT_ENVELOPE_KEYS = new Set([
+  'type', 'seq', 'time', 'data', 'surfaceOp', 'sourceEventSeqs',
+])
+
 /**
  * In-memory session store (`ctx.sessions`).
  *
@@ -789,6 +824,8 @@ export class SessionForkError extends Error {
  */
 export class SessionStore extends Service {
   private store = new Map<SessionId, SessionEntry>()
+  private readonly externalEventOwners = new Map<string, ActiveExternalEventTypeOwner>()
+  private readonly externalEventTypes = new Map<string, string>()
   private counter = 0
 
   constructor(ctx: Context) {
@@ -802,6 +839,117 @@ export class SessionStore extends Service {
         resolve: sessionId => this.get(sessionId),
       })
     })
+  }
+
+  /**
+   * Register one exact event vocabulary owned by a loaded external plugin.
+   * Repeating the same owner and vocabulary is reference-counted. A different
+   * owner for one type, a changed vocabulary for an active owner, a built-in
+   * type, or a type outside the declared prefix rejects before publication.
+   * @param registration - exact owner, namespace prefix, and complete event names.
+   * @returns an idempotent disposer for the caller's plugin effect.
+   */
+  registerEventTypes(registration: ExternalSessionEventTypeRegistration): () => void {
+    const { owner, prefix, types } = registration
+    const legacyEnvelope: unknown = (registration as unknown as Record<string, unknown>)['legacyEnvelope']
+    if (!/^[A-Za-z0-9@][A-Za-z0-9@._/-]{0,127}$/.test(owner)) {
+      throw new Error('session event type registration has an invalid owner')
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/$/.test(prefix)) {
+      throw new Error('session event type registration has an invalid prefix')
+    }
+    if (types.length === 0 || types.length > 128) {
+      throw new Error('session event type registration must contain between 1 and 128 types')
+    }
+    if (legacyEnvelope !== undefined && (
+      typeof legacyEnvelope !== 'object'
+      || legacyEnvelope === null
+      || Array.isArray(legacyEnvelope)
+      || Object.keys(legacyEnvelope).length !== 1
+      || (legacyEnvelope as Record<string, unknown>)['ignorable'] !== true
+    )) {
+      throw new Error('session event type registration has an invalid legacy envelope declaration')
+    }
+    const unique = new Set(types)
+    if (unique.size !== types.length) throw new Error('session event type registration contains duplicates')
+    for (const type of unique) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(type)) {
+        throw new Error('session event type registration contains an invalid name')
+      }
+      if (!type.startsWith(prefix)) {
+        throw new Error('session event type registration contains a type outside its prefix')
+      }
+      if (KNOWN_SESSION_EVENT_TYPES.has(type)) {
+        throw new Error('session event type registration cannot claim a built-in type')
+      }
+    }
+    const normalizedTypes = [...unique].sort()
+    const legacyIgnorable = legacyEnvelope !== undefined
+    const signature = JSON.stringify({ prefix, types: normalizedTypes, legacyIgnorable })
+    const activeOwner = this.externalEventOwners.get(owner)
+    if (activeOwner !== undefined && activeOwner.signature !== signature) {
+      throw new Error('session event type owner already registered a different vocabulary')
+    }
+    for (const type of normalizedTypes) {
+      const activeTypeOwner = this.externalEventTypes.get(type)
+      if (activeTypeOwner !== undefined && activeTypeOwner !== owner) {
+        throw new Error('session event type is already registered by another owner')
+      }
+    }
+    if (activeOwner === undefined) {
+      this.externalEventOwners.set(owner, { signature, types: normalizedTypes, legacyIgnorable, count: 1 })
+      for (const type of normalizedTypes) this.externalEventTypes.set(type, owner)
+    } else {
+      activeOwner.count += 1
+    }
+    let disposed = false
+    return () => {
+      if (disposed) return
+      disposed = true
+      const current = this.externalEventOwners.get(owner)
+      if (current === undefined) return
+      current.count -= 1
+      if (current.count > 0) return
+      this.externalEventOwners.delete(owner)
+      for (const type of current.types) this.externalEventTypes.delete(type)
+    }
+  }
+
+  /**
+   * Test whether the current plugin composition can interpret one event type.
+   * @param type - durable event name read from persistence.
+   * @returns true for a built-in or currently registered plugin event.
+   */
+  supportsEventType(type: string): boolean {
+    return KNOWN_SESSION_EVENT_TYPES.has(type) || this.externalEventTypes.has(type)
+  }
+
+  /**
+   * Normalize one stored event through its active external owner's exact legacy
+   * envelope declaration. The input artifact is never mutated. Built-in and
+   * unregistered types cannot use this compatibility path, and external events
+   * remain log-only: surface metadata plus the legacy marker is refused.
+   * @param event - detached event read from persistence.
+   * @returns the same current envelope, or a copy without exact `ignorable: true`.
+   */
+  normalizeRestoredEventEnvelope(event: SessionEvent): SessionEvent {
+    const record = event as unknown as Record<string, unknown>
+    const eventType = typeof record['type'] === 'string' ? record['type'] : '<invalid>'
+    const extensions = Object.keys(record).filter(key => !CURRENT_SESSION_EVENT_ENVELOPE_KEYS.has(key))
+    if (extensions.length === 0) return event
+    const owner = this.externalEventTypes.get(eventType)
+    const activeOwner = owner === undefined ? undefined : this.externalEventOwners.get(owner)
+    if (extensions.length !== 1
+      || extensions[0] !== 'ignorable'
+      || record['ignorable'] !== true
+      || record['surfaceOp'] !== undefined
+      || record['sourceEventSeqs'] !== undefined
+      || activeOwner?.legacyIgnorable !== true) {
+      throw new ExternalSessionEventEnvelopeUnsupportedError(eventType)
+    }
+    const normalized = { ...record }
+    delete normalized['ignorable']
+    return normalized as unknown as SessionEvent
   }
 
   /**

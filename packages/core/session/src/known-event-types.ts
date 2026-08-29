@@ -11,9 +11,8 @@
  * interpret a log containing a type outside this set: such a log was likely
  * written by a newer harness, and silently skipping the event could
  * reconstruct a wrong session.
- * Downstream (out-of-repo) plugin events are outside this list by
- * construction; a registration surface for them is deferred until such a
- * consumer exists.
+ * Downstream plugins register their event types on the live SessionStore;
+ * persistence accepts them only while that owning plugin is loaded.
  */
 export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'agent-preset/selected',
@@ -44,6 +43,7 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'schedule/change',
   'session-log-deepseek/delivery-accepted',
   'session/end-seed',
+  'session/external-task',
   'session/title',
   'session/title-llm-request',
   'step/end',

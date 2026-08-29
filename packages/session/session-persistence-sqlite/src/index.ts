@@ -112,6 +112,10 @@ export class SqliteSessionPersistence extends SessionPersistence {
     return this.coordinator.prepare(id, signal)
   }
 
+  override prepareExact(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
+    return this.coordinator.prepareExact(id, signal)
+  }
+
   load(id: SessionId): Promise<SessionInspection> {
     return this.coordinator.load(id)
   }

@@ -101,6 +101,39 @@ export interface ModuleLoaderV2 {
 /** Supported Node internal ESM loader shapes. */
 export type ModuleLoader = ModuleLoaderV1 | ModuleLoaderV2
 
+/** A resolver-shaped object before the Node-internal calling convention is known. */
+export interface UnversionedModuleLoader {
+  resolveSync: (...args: any[]) => unknown
+}
+
+/** Return whether an internal resolver result has the stable public fields we consume. */
+function isResolveResult(value: unknown): value is ResolveResult {
+  return typeof value === 'object' && value !== null
+    && typeof Reflect.get(value, 'url') === 'string'
+    && typeof Reflect.get(value, 'format') === 'string'
+}
+
+/**
+ * Detect the live Node-internal resolveSync convention by capability, not by
+ * Node's major version. Node 24 patch releases have shipped both conventions;
+ * Function.length is also not reliable because the v1 third parameter has a
+ * default. Resolving a builtin is side-effect free and independent of the
+ * current workspace.
+ */
+export function detectModuleLoaderVersion(loader: UnversionedModuleLoader): 'v1' | 'v2' | undefined {
+  const parentURL = import.meta.url
+  const specifier = 'node:path'
+  try {
+    const resolved = loader.resolveSync(parentURL, { specifier, attributes: {} })
+    if (isResolveResult(resolved) && resolved.url === specifier) return 'v2'
+  } catch {}
+  try {
+    const resolved = loader.resolveSync(specifier, parentURL, {})
+    if (isResolveResult(resolved) && resolved.url === specifier) return 'v1'
+  } catch {}
+  return undefined
+}
+
 /** Helpers for locating the current Node internal module loader. */
 export namespace ModuleLoader {
   let _cachedLoader: ModuleLoader | undefined
@@ -120,13 +153,10 @@ export namespace ModuleLoader {
   export function fromInternal(): ModuleLoader | undefined {
     if (_cachedLoader) return _cachedLoader
     const [major] = process.versions.node.split('.').map(Number)
-
-    if (major >= 24) {
-      const raw = requireInternal('internal/modules/esm/loader')?.getOrInitializeCascadedLoader()
-      if (raw) return _cachedLoader = Object.assign(raw, { version: 'v2' })
-    } else if (major >= 22) {
-      const raw = requireInternal('internal/modules/esm/loader')?.getOrInitializeCascadedLoader()
-      if (raw) return _cachedLoader = Object.assign(raw, { version: 'v1' })
-    }
+    if (major < 22) return undefined
+    const raw = requireInternal('internal/modules/esm/loader')?.getOrInitializeCascadedLoader()
+    if (!raw) return undefined
+    const version = detectModuleLoaderVersion(raw)
+    if (version !== undefined) return _cachedLoader = Object.assign(raw, { version })
   }
 }

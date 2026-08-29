@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore, { Session, SessionId, isJsonValue } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
@@ -12,6 +13,32 @@ import { runCoordinatorContract, type CoordinatorFixture } from './coordinator-c
 
 /** The durable store shape: materialized sessions only (no lazy entries). */
 type MemoryStore = Map<string, { meta: SessionHeader; events: SessionEvent[] }>
+
+/** Sanitized structural fixture copied from the immutable attempt4 archive envelope. */
+const ATTEMPT4_LEGACY_EXTERNAL_EVENTS = JSON.parse(readFileSync(
+  new URL('./fixtures/attempt4-legacy-external-events.json', import.meta.url),
+  'utf8',
+)) as SessionEvent[]
+
+/** Register the exact external vocabulary that owns the sanitized attempt4 fixture. */
+function registerAttempt4EventTypes(ctx: Context): () => void {
+  return ctx.sessions.registerEventTypes({
+    owner: 'dsh-langoclaw-skill',
+    prefix: 'langoClaw-skill/',
+    types: [
+      'langoClaw-skill/start',
+      'langoClaw-skill/user-input',
+      'langoClaw-skill/text',
+      'langoClaw-skill/card',
+      'langoClaw-skill/handoff',
+      'langoClaw-skill/error',
+      'langoClaw-skill/terminal',
+      'langoClaw-skill/activate',
+      'langoClaw-skill/direct',
+    ],
+    legacyEnvelope: { ignorable: true },
+  })
+}
 
 /** Test-store revision that changes for any metadata or event mutation. */
 function memoryRevision(entry: { meta: SessionHeader; events: SessionEvent[] }): SessionPersistenceRevision {
@@ -107,6 +134,10 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
 
   override prepare(id: SessionId, signal?: AbortSignal): ReturnType<PersistenceCoordinator['prepare']> {
     return this.coordinator.prepare(id, signal)
+  }
+
+  override prepareExact(id: SessionId, signal?: AbortSignal): ReturnType<PersistenceCoordinator['prepareExact']> {
+    return this.coordinator.prepareExact(id, signal)
   }
 
   load(id: SessionId): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
@@ -291,6 +322,170 @@ runCoordinatorContract('memory', async (): Promise<CoordinatorFixture> => {
     mount: async ctx => ctx.plugin(MemoryPersistence, { store }),
     cleanup: async () => { store.clear() },
   }
+})
+
+describe('PersistenceCoordinator registered legacy external envelopes', () => {
+  it('normalizes attempt4 in memory without rewriting raw storage and distinguishes unsupported extensions', async () => {
+    const ctx = new Context()
+    const store: MemoryStore = new Map()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(MemoryPersistence, { store })
+    const id = SessionId('attempt4-legacy-envelope')
+    const header = meta(id, '/w')
+    store.set(id, {
+      meta: structuredClone(header),
+      events: structuredClone(ATTEMPT4_LEGACY_EXTERNAL_EVENTS),
+    })
+    const dispose = registerAttempt4EventTypes(ctx)
+
+    try {
+      const before = JSON.stringify(store.get(id))
+      const loaded = await ctx.sessionPersistence.load(id)
+      expect(loaded.events.map(event => event.type)).toEqual(ATTEMPT4_LEGACY_EXTERNAL_EVENTS.map(event => event.type))
+      expect(loaded.events.some(event => Object.hasOwn(event, 'ignorable'))).toBe(false)
+      expect(loaded.events.some(event => ['turn/start', 'user/message', 'assistant/message'].includes(event.type))).toBe(false)
+      expect(JSON.stringify(store.get(id))).toBe(before)
+
+      const unsupportedId = SessionId('attempt4-unsupported-extension')
+      store.set(unsupportedId, {
+        meta: meta(unsupportedId, '/w'),
+        events: structuredClone(ATTEMPT4_LEGACY_EXTERNAL_EVENTS).map((event, index) => index === 3
+          ? { ...event, ignorable: false } as unknown as SessionEvent
+          : event),
+      })
+      await expect(ctx.sessionPersistence.load(unsupportedId)).rejects.toMatchObject({
+        name: 'SessionFormatUnsupportedError',
+      })
+
+      const corruptId = SessionId('attempt4-true-corruption')
+      store.set(corruptId, {
+        meta: meta(corruptId, '/w'),
+        events: structuredClone(ATTEMPT4_LEGACY_EXTERNAL_EVENTS).map((event, index) => index === 7
+          ? { ...event, seq: 9 }
+          : event),
+      })
+      await expect(ctx.sessionPersistence.load(corruptId)).rejects.toMatchObject({
+        name: 'SessionPersistenceCorruptionError',
+      })
+    } finally {
+      dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('publishes an exact attempt4 fixture without touching storage and defers its marker until owner append', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    const id = SessionId('attempt4-exact-read-only-publish')
+    backend.store.set(id, {
+      meta: meta(id, '/w'),
+      events: structuredClone(ATTEMPT4_LEGACY_EXTERNAL_EVENTS),
+    })
+    const unregister = registerAttempt4EventTypes(ctx)
+    let coordinator!: PersistenceCoordinator<never>
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    const before = JSON.stringify(backend.store.get(id))
+    const preparation = await coordinator.prepareExact(id)
+    const detach = ctx.sessions.enter(preparation.session)
+
+    try {
+      ctx.sessions.announce(preparation.session)
+      await expect(ctx.sessions.flush(preparation.session)).resolves.toBe(true)
+      expect(preparation.session.events.at(-1)).toMatchObject({ type: 'session/end-seed', seq: 8 })
+      expect(backend.appendAttempts).toBe(0)
+      expect(JSON.stringify(backend.store.get(id))).toBe(before)
+
+      preparation.session.append('turn/start', { turn: 1 })
+      await expect(ctx.sessions.flush(preparation.session)).resolves.toBe(true)
+      expect(backend.appendAttempts).toBe(1)
+      expect(backend.lastAppendedBatch?.map(event => event.type)).toEqual([
+        'session/end-seed',
+        'turn/start',
+      ])
+      expect(backend.store.get(id)?.events.slice(-2).map(event => event.seq)).toEqual([8, 9])
+    } finally {
+      detach()
+      preparation[Symbol.dispose]()
+      unregister()
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('repeatedly publishes an exact attempt4 fixture that already has end-seed without writes', async () => {
+    const backend = new ControlledBackend()
+    const id = SessionId('attempt4-exact-existing-end-seed')
+    backend.store.set(id, {
+      meta: meta(id, '/w'),
+      events: [
+        ...structuredClone(ATTEMPT4_LEGACY_EXTERNAL_EVENTS),
+        { type: 'session/end-seed', seq: 8, time: 9, data: {} },
+      ] as SessionEvent[],
+    })
+    const before = JSON.stringify(backend.store.get(id))
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const ctx = new Context()
+      await ctx.plugin(SessionStore)
+      const unregister = registerAttempt4EventTypes(ctx)
+      let coordinator!: PersistenceCoordinator<never>
+      const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+        coordinator = new PersistenceCoordinator(inner, backend)
+      }, { inject: ['sessions'] }))
+      const preparation = await coordinator.prepareExact(id)
+      const detach = ctx.sessions.enter(preparation.session)
+      try {
+        ctx.sessions.announce(preparation.session)
+        await expect(ctx.sessions.flush(preparation.session)).resolves.toBe(true)
+      } finally {
+        detach()
+        preparation[Symbol.dispose]()
+        unregister()
+        await fiber.dispose()
+        await ctx.fiber.dispose()
+      }
+    }
+
+    expect(backend.appendAttempts).toBe(0)
+    expect(backend.repairAttempts).toBe(0)
+    expect(JSON.stringify(backend.store.get(id))).toBe(before)
+  })
+
+  it('does not write an exact attempt4 fixture when registry publication rolls back', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    const id = SessionId('attempt4-exact-publication-failure')
+    backend.store.set(id, {
+      meta: meta(id, '/w'),
+      events: structuredClone(ATTEMPT4_LEGACY_EXTERNAL_EVENTS),
+    })
+    const unregister = registerAttempt4EventTypes(ctx)
+    let coordinator!: PersistenceCoordinator<never>
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    ctx.on('session/created', () => { throw new Error('registry publication failed') })
+    const before = JSON.stringify(backend.store.get(id))
+    const preparation = await coordinator.prepareExact(id)
+    const detach = ctx.sessions.enter(preparation.session)
+
+    try {
+      expect(() => { ctx.sessions.announce(preparation.session) }).toThrow('registry publication failed')
+      await Promise.resolve()
+      expect(backend.appendAttempts).toBe(0)
+      expect(JSON.stringify(backend.store.get(id))).toBe(before)
+    } finally {
+      detach()
+      preparation[Symbol.dispose]()
+      unregister()
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
 })
 
 describe('PersistenceCoordinator seed ownership', () => {
@@ -1034,6 +1229,61 @@ describe('PersistenceCoordinator session preparations', () => {
     } finally {
       second?.[Symbol.dispose]()
       first?.[Symbol.dispose]()
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reserves a balanced durable session without writing recovery', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    const id = SessionId('prepare-exact-balanced')
+    backend.store.set(id, { meta: meta(id), events: oneTurnLog() })
+    let coordinator!: PersistenceCoordinator<never>
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    let preparation: Awaited<ReturnType<typeof coordinator.prepareExact>> | undefined
+
+    try {
+      preparation = await coordinator.prepareExact(id)
+      expect(preparation.session.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'turn/start' }),
+        expect.objectContaining({ type: 'turn/end' }),
+      ]))
+      expect(backend.repairAttempts).toBe(0)
+      expect(backend.store.get(id)?.events).toEqual(oneTurnLog())
+    } finally {
+      preparation?.[Symbol.dispose]()
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('refuses read-only preparation when the durable log needs recovery', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    const id = SessionId('prepare-exact-recovery-required')
+    backend.store.set(id, {
+      meta: meta(id),
+      events: [{ type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }],
+    })
+    let coordinator!: PersistenceCoordinator<never>
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+
+    try {
+      await expect(coordinator.prepareExact(id)).rejects.toMatchObject({
+        name: 'SessionPersistenceRecoveryRequiredError',
+        sessionId: id,
+      })
+      expect(backend.repairAttempts).toBe(0)
+      expect(backend.store.get(id)?.events.map(event => event.type)).toEqual(['turn/start'])
+      expect(ctx.sessions.get(id)).toBeUndefined()
+    } finally {
       await fiber.dispose()
       await ctx.fiber.dispose()
     }

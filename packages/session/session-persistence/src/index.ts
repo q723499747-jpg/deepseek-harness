@@ -13,7 +13,10 @@ import type { SessionPersistenceRevision } from './revision.ts'
 // Re-export the metadata vocabulary so Consumers import it from the Service Definition.
 export type { SessionHeader } from '@deepseek-ai/dsh-session'
 export { SessionPersistenceRevision } from './revision.ts'
-export { SessionPersistenceNotFoundError } from './errors.ts'
+export {
+  SessionPersistenceNotFoundError,
+  SessionPersistenceRecoveryRequiredError,
+} from './errors.ts'
 
 /** Lightweight immutable source identity returned without loading a full log. */
 export interface SessionPersistenceSnapshot {
@@ -196,6 +199,21 @@ export abstract class SessionPersistence extends Service {
       meta: structuredClone(loaded.meta),
       seedSource: 'persistence',
     }))
+  }
+
+  /**
+   * Prepare an exact unpublished Session without repairing or otherwise
+   * changing its durable artifact. Implementations that support this seam
+   * reject logs with a torn tail or synthetic recovery events instead of
+   * committing those changes. The default fails closed so a third-party
+   * backend cannot accidentally inherit write-free semantics it does not own.
+   * @param _id - persisted session to prepare.
+   * @param signal - optional cancellation for preparation work.
+   * @returns one owned unpublished Session preparation.
+   */
+  prepareExact(_id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
+    signal?.throwIfAborted()
+    return Promise.reject(new Error('this session persistence backend does not support exact read-only preparation'))
   }
 
   /**

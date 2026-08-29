@@ -603,6 +603,32 @@ Host service backing the generated `ctx.remote.session` namespace.
 
 ```ts cordis-catalog
 /**
+ * Persist one idempotent list-visibility marker for an external task Session.
+ * This operation never appends a model turn or a user/model message.
+ * @param session - live Session owned by the calling Host integration.
+ * @param marker - opaque producer/task correlation.
+ */
+markExternalTaskVisible(session: Session, marker: ExternalTaskSessionMarker): void
+
+/**
+ * Publish one exact durable Session into the live registry without mounting
+ * an Agent, appending an event, marking it list-visible, or calling a model.
+ * Concurrent callers for one identity share the same hydration transaction.
+ * @param request - exact durable identity and authorized workspace.
+ * @param signal - optional cancellation before registry publication.
+ * @returns the live exact Session and whether this call hydrated it.
+ */
+resolveDurableSession( request: DurableSessionResolveRequest, signal?: AbortSignal, ): Promise<DurableSessionResolveResult>
+
+/**
+ * Resolve one durable Session with a bounded classification safe for Host consumers.
+ * @param request - exact durable identity and authorized workspace.
+ * @param signal - optional cancellation before registry publication.
+ * @returns the resolved Session or a content-free failure code.
+ */
+async resolveDurableSessionSafe( request: DurableSessionResolveRequest, signal?: AbortSignal, ): Promise<DurableSessionSafeResolveResult>
+
+/**
  * Resolve or resume one ordinary Session for another Host API domain.
  * @param sessionId - Session identity whose Agent owns the operation.
  * @returns the live Agent or the stable Session-domain failure.
@@ -748,6 +774,33 @@ In-memory session store (`ctx.sessions`).
 Persistence is intentionally not implemented here — persistence plugins subscribe to `session/event` and flush on `session/flush` / dispose.
 
 ```ts cordis-catalog
+/**
+ * Register one exact event vocabulary owned by a loaded external plugin.
+ * Repeating the same owner and vocabulary is reference-counted. A different
+ * owner for one type, a changed vocabulary for an active owner, a built-in
+ * type, or a type outside the declared prefix rejects before publication.
+ * @param registration - exact owner, namespace prefix, and complete event names.
+ * @returns an idempotent disposer for the caller's plugin effect.
+ */
+registerEventTypes(registration: ExternalSessionEventTypeRegistration): () => void
+
+/**
+ * Test whether the current plugin composition can interpret one event type.
+ * @param type - durable event name read from persistence.
+ * @returns true for a built-in or currently registered plugin event.
+ */
+supportsEventType(type: string): boolean
+
+/**
+ * Normalize one stored event through its active external owner's exact legacy
+ * envelope declaration. The input artifact is never mutated. Built-in and
+ * unregistered types cannot use this compatibility path, and external events
+ * remain log-only: surface metadata plus the legacy marker is refused.
+ * @param event - detached event read from persistence.
+ * @returns the same current envelope, or a copy without exact `ignorable: true`.
+ */
+normalizeRestoredEventEnvelope(event: SessionEvent): SessionEvent
+
 /**
  * Create a session owned by the calling fiber: disposing that fiber stops
  * event notification and removes the session from the store. `options.seed`

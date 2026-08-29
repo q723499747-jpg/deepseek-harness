@@ -55,7 +55,7 @@ Host tsdown 在普通根配置中启用 `typertPlugin({ mode: 'workspace', faces
 
 TypeScript compiler face 与 Typert 运行时产物 face 是两层概念。普通 `dshClient` package 即使只有一个 compiler project，也可以按公开 subpath 同时贡献 Host 与 Client 运行时模型；aggregate 显式引用 `tsconfig.host.json` 或 `tsconfig.client.json` 时，analyzer 才把该 project 限定到对应 face。因此 `api-remotes` 的 Host 分析不会顺带注册其 Client 入口，普通双入口 package 的 Host 模型也不会丢失。
 
-Host 与 Client 两次 tsdown 都接收 `vendor/*`、`packages/*/*` 和 `apps/cli` 这组完整 workspace。根配置不扫描 `lib/types/client/index.js`，不维护 package 分类表，也不使用 tsdown filter；包内配置根据 `DSH_BUILD_FACE` 返回本阶段入口。
+Host 与 Client 两次 tsdown 都接收 `vendor/*`、`packages/*/*` 和 `apps/cli` 下由 package manifest 声明的同一组完整 workspace。根配置先按确定的路径顺序解析这些 manifest 的所属目录，再把确切的 package 目录交给 tsdown。因此，仅因 `node_modules` 等忽略内容而残留的目录不属于 package，也不会在 workspace 发现阶段向上误用根 manifest。根配置不扫描 `lib/types/client/index.js`，不维护 package 分类表，也不使用 tsdown filter；包内配置根据 `DSH_BUILD_FACE` 返回本阶段入口。
 
 普通 Client plugin 在 Host pass 返回空配置，在 Client pass 同时生成 Node loader 入口与 browser bundle。`api-remotes` 的 `clientBundle(..., { hostPhase: true })` 是唯一阶段例外：Host pass 生成其 Host 入口，Client pass 只生成 browser bundle。未指定 `DSH_BUILD_FACE` 的 package-local tsdown 仍同时返回该 package 的正常入口，供本地单包开发使用。
 
@@ -73,7 +73,7 @@ Host 与 Client 两次 tsdown 都接收 `vendor/*`、`packages/*/*` 和 `apps/cl
 
 ## 后果
 
-干净构建成为顺序正确性的权威验证：没有任何既存 `/remote` 产物时，Host tsc 必须先成功，Host tsdown 必须生成约定，随后 Client tsc、Client tsdown 与 Web build 必须成功。任何阶段都不得把产物写进 `src`。
+干净构建成为顺序正确性的权威验证：没有任何既存 `/remote` 产物时，Host tsc 必须先成功，Host tsdown 必须生成约定，随后 Client tsc、Client tsdown 与 Web build 必须成功。任何阶段都不得把产物写进 `src`。复制源码树时，移除忽略内容后仍可能保留空父目录，因此 package 是否参与构建取决于复制后的 manifest，而不是目录是否存在。
 
 [TypeScript 构建配置 Note](2026-06-17-ts-build-config.zh.md)确定的 tsc-first 职责保持不变，但其单次全图 tsc 后再打包的命令形态由本文的有序阶段取代。[双 aggregate solution Note](2026-07-22-tsconfig-solution-root-two-aggregates.zh.md)确定的普通 package 单 aggregate 规则保持不变，本文只为 `api/remotes` 建立一个显式例外。
 
